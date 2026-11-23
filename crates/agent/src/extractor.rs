@@ -273,3 +273,184 @@ fn sanitize_key(raw: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use time::OffsetDateTime;
+
+    use super::*;
+    use crate::config::HttpSiteConfig;
+    use crate::feeds::MatchedKeyword;
+
+    proptest! {
+        #[test]
+        fn sanitize_key_is_idempotent_and_safe_ascii(raw in ".*") {
+            let s1 = sanitize_key(&raw);
+            let s2 = sanitize_key(&s1);
+            prop_assert_eq!(s1.chars().count(), raw.chars().count());
+            prop_assert_eq!(&s1, &s2);
+            prop_assert!(s1.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'));
+        }
+
+        #[test]
+        fn extract_facts_maintains_count_and_ratio_invariants(
+            site_flags in prop::collection::vec((any::<bool>(), any::<bool>(), any::<bool>()), 0..8),
+            feed_disabled in prop::collection::vec(any::<bool>(), 0..5),
+            nbu_disabled: bool,
+            article_specs in prop::collection::vec(
+                (
+                    prop_oneof![Just("cybersecurity"), Just("economics"), Just("general")],
+                    0.0_f64..50.0_f64,
+                    any::<bool>(),
+                    prop::option::of(1000_u32..9999_u32),
+                ),
+                0..10,
+            ),
+            usd in 10.0_f64..80.0_f64,
+            eur in 10.0_f64..90.0_f64,
+            usd_delta in -20.0_f64..20.0_f64,
+            eur_delta in -20.0_f64..20.0_f64,
+        ) {
+            let sites: Vec<HttpSiteState> = site_flags
+                .iter()
+                .enumerate()
+                .map(|(i, &(changed, acknowledged, disabled))| {
+                    let mut st = HttpSiteState::from_config(&HttpSiteConfig {
+                        id: format!("site-{i}"),
+                        name: format!("Site {i}"),
+                        url: format!("http://mock/{i}"),
+                        category: "test".into(),
+                    });
+                    st.changed = changed;
+                    st.acknowledged = acknowledged;
+                    st.health.disabled = disabled;
+                    st.body_size = Some((i as u64 + 1) * 100);
+                    st
+                })
+                .collect();
+
+            let feeds: Vec<FeedMonitorState> = feed_disabled
+                .iter()
+                .enumerate()
+                .map(|(i, &disabled)| FeedMonitorState {
+                    id: format!("feed-{i}"),
+                    name: format!("Feed {i}"),
+                    url: format!("http://mock/rss/{i}"),
+                    group: "cybersecurity".into(),
+                    matched_count: 0,
+                    health: SourceHealth {
+                        disabled,
+                        ..Default::default()
+                    },
+                })
+                .collect();
+
+            let nbu_health = SourceHealth {
+                disabled: nbu_disabled,
+                ..Default::default()
+            };
+
+            let articles: Vec<NewsArticle> = article_specs
+                .iter()
+                .enumerate()
+                .map(|(i, &(group, score, critical_kw, cve_num))| {
+                    let matched_keywords = if critical_kw {
+                        vec![MatchedKeyword {
+                            word: "ransomware".into(),
+                            weight: 3.0,
+                            in_title: true,
+                            in_body: false,
+                            contribution: 6.0,
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    let cves = cve_num
+                        .map(|n| vec![format!("CVE-2026-{n:04}")])
+                        .unwrap_or_default();
+                    NewsArticle {
+                        id: format!("{i:016x}"),
+                        feed_id: "f".into(),
+                        feed_name: "F".into(),
+                        group: group.into(),
+                        title: format!("Art {i}"),
+                        link: format!("http://mock/a/{i}"),
+                        published: None,
+                        summary: String::new(),
+                        matched_keywords,
+                        relevance_score: score,
+                        cves,
+                        fetched_at: OffsetDateTime::UNIX_EPOCH,
+                    }
+                })
+                .collect();
+
+            let currencies = vec![
+                CurrencyRate {
+                    cc: "USD".into(),
+                    txt: "USD".into(),
+                    rate: usd,
+                    previous_rate: Some(usd),
+                    delta_pct: Some(usd_delta),
+                    exchangedate: "23.11.2026".into(),
+                },
+                CurrencyRate {
+                    cc: "EUR".into(),
+                    txt: "EUR".into(),
+                    rate: eur,
+                    previous_rate: Some(eur),
+                    delta_pct: Some(eur_delta),
+                    exchangedate: "23.11.2026".into(),
+                },
+            ];
+
+            let facts = extract_facts(&sites, &feeds, &articles, &currencies, &nbu_health);
+
+            // Усі витягнуті факти належать WebAgent і мають CF у [0, 1]
+            for fact in facts.values() {
+                prop_assert_eq!(fact.origin, FactOrigin::WebAgent);
+                prop_assert!((0.0..=1.0).contains(&fact.cf));
+            }
+
+            let changed = facts["http_changed_sites_count"].value.as_f64().unwrap();
+            let monitored = facts["http_monitored_sites_count"].value.as_f64().unwrap();
+            let disabled = facts["disabled_sources_count"].value.as_f64().unwrap();
+            let total_art = facts["total_matched_articles"].value.as_f64().unwrap();
+            let cyber_art = facts["cyber_articles_count"].value.as_f64().unwrap();
+            let cyber_crit = facts["cyber_critical_articles"].value.as_f64().unwrap();
+            let cve_count = facts["cve_mentions_count"].value.as_f64().unwrap();
+
+            prop_assert!(changed <= monitored);
+            prop_assert_eq!(monitored as usize, sites.len());
+
+            let expected_disabled = sites.iter().filter(|s| s.health.disabled).count()
+                + feeds.iter().filter(|f| f.health.disabled).count()
+                + usize::from(nbu_disabled);
+            prop_assert_eq!(disabled as usize, expected_disabled);
+
+            prop_assert_eq!(total_art as usize, articles.len());
+            prop_assert!(cyber_crit <= cyber_art);
+            prop_assert!(cyber_art <= total_art);
+
+            // detected_cves присутній тоді й лише тоді, коли знайдено хоча б 1 унікальний CVE, і відсортований
+            if cve_count > 0.0 {
+                let text = facts["detected_cves"].value.as_text();
+                let list: Vec<&str> = text.split(", ").collect();
+                prop_assert_eq!(list.len(), cve_count as usize);
+                for pair in list.windows(2) {
+                    prop_assert!(pair[0] < pair[1]);
+                }
+            } else {
+                prop_assert!(!facts.contains_key("detected_cves"));
+            }
+
+            // Перевірка відношення EUR/USD та максимального модуля дельти
+            let expected_ratio = ((eur / usd) * 10_000.0).round() / 10_000.0;
+            prop_assert!((facts["nbu_eur_usd_ratio"].value.as_f64().unwrap() - expected_ratio).abs() < 1e-9);
+
+            let expected_max_delta = (usd_delta.abs().max(eur_delta.abs()) * 10_000.0).round() / 10_000.0;
+            prop_assert!((facts["nbu_max_abs_delta_pct"].value.as_f64().unwrap() - expected_max_delta).abs() < 1e-9);
+        }
+    }
+}

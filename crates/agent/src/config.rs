@@ -409,3 +409,108 @@ impl AppConfig {
         Ok(config)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #[test]
+        fn server_config_new_matches_validation_rules(
+            bind_addr in "[ \tA-Za-z0-9.:]{0,20}",
+            poll_interval_secs: u64,
+            request_timeout_secs: u64,
+            max_concurrent_requests: usize,
+        ) {
+            let expected_ok = !bind_addr.trim().is_empty()
+                && poll_interval_secs > 0
+                && request_timeout_secs > 0
+                && max_concurrent_requests > 0;
+            let res = ServerConfig::new(
+                bind_addr,
+                poll_interval_secs,
+                request_timeout_secs,
+                max_concurrent_requests,
+                RetryPolicy::default(),
+            );
+            prop_assert_eq!(res.is_ok(), expected_ok);
+        }
+
+        #[test]
+        fn logging_config_new_matches_validation_rules(
+            dir in "[A-Za-z0-9/_-]{0,16}",
+            file_prefix in "[ \tA-Za-z0-9._-]{0,20}",
+            max_files: usize,
+        ) {
+            let expected_ok = !dir.is_empty() && !file_prefix.trim().is_empty() && max_files > 0;
+            let res = LoggingConfig::new(
+                PathBuf::from(dir),
+                file_prefix,
+                LogRotation::Daily,
+                max_files,
+            );
+            prop_assert_eq!(res.is_ok(), expected_ok);
+        }
+
+        #[test]
+        fn keyword_criterion_new_enforces_non_empty_word_and_positive_finite_weight(
+            word in "[ \tA-Za-z0-9_-]{0,16}",
+            weight: f64,
+        ) {
+            let expected_ok = !word.trim().is_empty() && weight.is_finite() && weight > 0.0;
+            let res = KeywordCriterion::new(word, weight);
+            prop_assert_eq!(res.is_ok(), expected_ok);
+        }
+
+        #[test]
+        fn app_config_new_rejects_duplicate_or_empty_site_and_feed_ids(
+            site_ids in prop::collection::vec("[ \ta-c]{0,3}", 0..6),
+            feed_ids in prop::collection::vec("[ \ta-c]{0,3}", 0..6),
+        ) {
+            let sites_valid = {
+                let mut seen = HashSet::new();
+                site_ids.iter().all(|id| !id.trim().is_empty() && seen.insert(id.as_str()))
+            };
+            let feeds_valid = {
+                let mut seen = HashSet::new();
+                feed_ids.iter().all(|id| !id.trim().is_empty() && seen.insert(id.as_str()))
+            };
+
+            let sites = site_ids
+                .into_iter()
+                .map(|id| HttpSiteConfig {
+                    id,
+                    name: "Site".into(),
+                    url: "http://mock.local".into(),
+                    category: "test".into(),
+                })
+                .collect();
+            let feeds = feed_ids
+                .into_iter()
+                .map(|id| NewsFeedConfig {
+                    id,
+                    name: "Feed".into(),
+                    group: "cyber".into(),
+                    url: "http://mock.local/rss".into(),
+                    keywords: vec![],
+                })
+                .collect();
+
+            let res = AppConfig::new(
+                ServerConfig::new("127.0.0.1:0".into(), 60, 5, 4, RetryPolicy::default()).unwrap(),
+                LoggingConfig::default(),
+                DssConfig {
+                    rules_path: PathBuf::from("rules.toml"),
+                    state_path: PathBuf::from("state.json"),
+                },
+                NbuMetricsConfig::default(),
+                sites,
+                feeds,
+            );
+
+            prop_assert_eq!(res.is_ok(), sites_valid && feeds_valid);
+        }
+    }
+}

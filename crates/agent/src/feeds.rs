@@ -244,3 +244,172 @@ fn html_to_plain_text(input: &str) -> String {
         .unwrap_or_else(|_| html_escape::decode_html_entities(input).into_owned());
     rendered.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn is_canonical_cve(s: &str) -> bool {
+        let parts: Vec<&str> = s.split('-').collect();
+        parts.len() == 3
+            && parts[0] == "CVE"
+            && parts[1].len() == 4
+            && parts[1].bytes().all(|b| b.is_ascii_digit())
+            && (4..=7).contains(&parts[2].len())
+            && parts[2].bytes().all(|b| b.is_ascii_digit())
+    }
+
+    proptest! {
+        #[test]
+        fn extract_cves_always_outputs_unique_canonical_ids(text in ".*") {
+            let cves = extract_cves(&text);
+            let mut seen = HashSet::new();
+            for cve in &cves {
+                prop_assert!(is_canonical_cve(cve));
+                prop_assert!(seen.insert(cve.as_str()));
+            }
+        }
+
+        #[test]
+        fn extract_cves_finds_embedded_valid_ids_regardless_of_case_and_deduplicates(
+            year in 1999_u32..=2099,
+            seq_digits in "[0-9]{4,7}",
+            prefix_case in prop_oneof![Just("CVE"), Just("cve"), Just("CvE"), Just("cVe")],
+            left_sep in "[ ,.;:()\\[\\]\\n]{1,4}",
+            right_sep in "[ ,.;:()\\[\\]\\n]{1,4}",
+        ) {
+            let raw_cve = format!("{prefix_case}-{year}-{seq_digits}");
+            let expected = format!("CVE-{year}-{seq_digits}");
+            let text = format!("alert{left_sep}{raw_cve}{right_sep}repeat {raw_cve}");
+
+            let found = extract_cves(&text);
+            prop_assert_eq!(found, vec![expected]);
+        }
+
+        #[test]
+        fn extract_cves_rejects_malformed_digit_lengths(
+            bad_year in prop_oneof!["[0-9]{1,3}", "[0-9]{5,6}"],
+            good_year in "[0-9]{4}",
+            bad_seq in prop_oneof!["[0-9]{1,3}", "[0-9]{8,10}"],
+            good_seq in "[0-9]{4,7}",
+        ) {
+            let text = format!("CVE-{bad_year}-{good_seq} CVE-{good_year}-{bad_seq}");
+            prop_assert!(extract_cves(&text).is_empty());
+        }
+
+        #[test]
+        fn filter_and_rank_sorts_strictly_and_weights_title_higher_than_body(
+            weight in 0.5_f64..10.0_f64,
+            extra_items in prop::collection::vec(
+                (
+                    "[A-Za-z0-9 ]{1,30}",
+                    "[A-Za-z0-9 ]{0,40}",
+                    any::<bool>(),
+                    any::<bool>(),
+                ),
+                0..15,
+            ),
+        ) {
+            let feed = NewsFeedConfig {
+                id: "prop-feed".into(),
+                name: "Prop Feed".into(),
+                group: "cybersecurity".into(),
+                url: "http://mock.local/rss".into(),
+                keywords: vec![
+                    KeywordCriterion::new("sentinel".into(), weight).unwrap(),
+                    KeywordCriterion::new("rustlang".into(), 1.5).unwrap(),
+                ],
+            };
+
+            let mut raw_items = vec![
+                RawFeedItem {
+                    title: "Only body match".into(),
+                    link: "http://mock.local/body".into(),
+                    published: None,
+                    summary: "mentions sentinel once".into(),
+                },
+                RawFeedItem {
+                    title: "Title sentinel match".into(),
+                    link: "http://mock.local/title".into(),
+                    published: None,
+                    summary: "plain text".into(),
+                },
+                RawFeedItem {
+                    title: "Both sentinel match".into(),
+                    link: "http://mock.local/both".into(),
+                    published: None,
+                    summary: "and sentinel again".into(),
+                },
+                RawFeedItem {
+                    title: "Both sentinel with CVE-2026-12345".into(),
+                    link: "http://mock.local/both-cve".into(),
+                    published: None,
+                    summary: "and sentinel again".into(),
+                },
+            ];
+
+            for (i, (t, s, has_kw, has_cve)) in extra_items.into_iter().enumerate() {
+                let title = if has_kw { format!("{t} rustlang") } else { t };
+                let summary = if has_cve { format!("{s} CVE-2026-9999") } else { s };
+                raw_items.push(RawFeedItem {
+                    title,
+                    link: format!("http://mock.local/extra/{i}"),
+                    published: None,
+                    summary,
+                });
+            }
+
+            let ranked = filter_and_rank_items(&feed, raw_items);
+
+            // Усі відібрані статті мають хоча б одне ключове слово та додатній рейтинг
+            for a in &ranked {
+                prop_assert!(!a.matched_keywords.is_empty());
+                prop_assert!(a.relevance_score > 0.0);
+                prop_assert_eq!(a.id.len(), 16);
+                prop_assert!(a.id.bytes().all(|b| b.is_ascii_hexdigit()));
+            }
+
+            // Порядок сортування відповідає інваріанту
+            for pair in ranked.windows(2) {
+                let (a, b) = (&pair[0], &pair[1]);
+                let ord = b
+                    .relevance_score
+                    .total_cmp(&a.relevance_score)
+                    .then_with(|| b.matched_keywords.len().cmp(&a.matched_keywords.len()))
+                    .then_with(|| a.title.cmp(&b.title));
+                prop_assert!(ord != std::cmp::Ordering::Greater);
+            }
+
+            let score_of = |link: &str| {
+                ranked
+                    .iter()
+                    .find(|a| a.link == link)
+                    .map(|a| a.relevance_score)
+                    .unwrap()
+            };
+            let s_body = score_of("http://mock.local/body");
+            let s_title = score_of("http://mock.local/title");
+            let s_both = score_of("http://mock.local/both");
+            let s_both_cve = score_of("http://mock.local/both-cve");
+
+            prop_assert!(s_title > s_body);
+            prop_assert!(s_both > s_title);
+            prop_assert!((s_both_cve - (s_both + 2.0)).abs() < 1e-6);
+        }
+
+        #[test]
+        fn article_id_is_deterministic_16_char_hex(
+            feed_id in ".{0,32}",
+            link in ".{0,64}",
+            title in ".{0,64}",
+        ) {
+            let id1 = article_id(&feed_id, &link, &title);
+            let id2 = article_id(&feed_id, &link, &title);
+            prop_assert_eq!(&id1, &id2);
+            prop_assert_eq!(id1.len(), 16);
+            prop_assert!(id1.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        }
+    }
+}

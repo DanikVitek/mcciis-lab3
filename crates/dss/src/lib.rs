@@ -536,3 +536,267 @@ fn check_conditions(
 
     Some((min_cf, traces))
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn arb_fact_value() -> impl Strategy<Value = FactValue> {
+        prop_oneof![
+            any::<bool>().prop_map(FactValue::Bool),
+            (-1e6_f64..1e6_f64).prop_map(FactValue::Number),
+            "[A-Za-z0-9 _-]{0,24}".prop_map(FactValue::Text),
+        ]
+    }
+
+    fn arb_severity() -> impl Strategy<Value = Severity> {
+        prop_oneof![
+            Just(Severity::Info),
+            Just(Severity::Medium),
+            Just(Severity::High),
+            Just(Severity::Critical),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn combine_cf_satisfies_mycin_algebraic_laws(
+            a in 0.0_f64..=1.0_f64,
+            b in 0.0_f64..=1.0_f64,
+            c in 0.0_f64..=1.0_f64,
+        ) {
+            let ab = InferenceEngine::combine_cf(a, b);
+            let ba = InferenceEngine::combine_cf(b, a);
+            prop_assert!((0.0..=1.0).contains(&ab));
+            prop_assert!((ab - ba).abs() < 1e-12);
+            prop_assert!(ab + 1e-12 >= a.max(b));
+
+            let lhs = InferenceEngine::combine_cf(ab, c);
+            let rhs = InferenceEngine::combine_cf(a, InferenceEngine::combine_cf(b, c));
+            prop_assert!((lhs - rhs).abs() < 1e-12);
+
+            prop_assert!((InferenceEngine::combine_cf(a, 0.0) - a).abs() < 1e-12);
+            prop_assert!((InferenceEngine::combine_cf(a, 1.0) - 1.0).abs() < 1e-12);
+        }
+
+        #[test]
+        fn combine_cf_clamps_out_of_range_inputs(
+            a in -100.0_f64..100.0_f64,
+            b in -100.0_f64..100.0_f64,
+        ) {
+            let combined = InferenceEngine::combine_cf(a, b);
+            prop_assert!((0.0..=1.0).contains(&combined));
+        }
+
+        #[test]
+        fn operator_eq_ne_and_numeric_order_laws(
+            x in -1e6_f64..1e6_f64,
+            y in -1e6_f64..1e6_f64,
+        ) {
+            let vx = FactValue::Number(x);
+            let vy = FactValue::Number(y);
+
+            prop_assert!(Operator::Eq.matches(&vx, &vx));
+            prop_assert_eq!(Operator::Eq.matches(&vx, &vy), Operator::Eq.matches(&vy, &vx));
+            prop_assert_eq!(Operator::Ne.matches(&vx, &vy), !Operator::Eq.matches(&vx, &vy));
+
+            prop_assert_eq!(Operator::Gt.matches(&vx, &vy), Operator::Lt.matches(&vy, &vx));
+            prop_assert_eq!(Operator::Gte.matches(&vx, &vy), Operator::Lte.matches(&vy, &vx));
+            prop_assert!(!(Operator::Gt.matches(&vx, &vy) && Operator::Lt.matches(&vx, &vy)));
+            prop_assert!(Operator::Gte.matches(&vx, &vy) || Operator::Lt.matches(&vx, &vy));
+            prop_assert!(Operator::Lte.matches(&vx, &vy) || Operator::Gt.matches(&vx, &vy));
+        }
+
+        #[test]
+        fn operator_ne_is_negation_of_eq_for_arbitrary_fact_values(
+            a in arb_fact_value(),
+            b in arb_fact_value(),
+        ) {
+            prop_assert_eq!(Operator::Ne.matches(&a, &b), !Operator::Eq.matches(&a, &b));
+        }
+
+        #[test]
+        fn operator_contains_is_reflexive_and_case_insensitive(
+            prefix in "[a-zA-Z0-9 ]{0,12}",
+            needle in "[a-zA-Z0-9]{1,12}",
+            suffix in "[a-zA-Z0-9 ]{0,12}",
+        ) {
+            let haystack = FactValue::Text(format!("{prefix}{needle}{suffix}"));
+            let upper = FactValue::Text(needle.to_ascii_uppercase());
+            let lower = FactValue::Text(needle.to_ascii_lowercase());
+
+            prop_assert!(Operator::Contains.matches(&haystack, &haystack));
+            prop_assert!(Operator::Contains.matches(&haystack, &upper));
+            prop_assert!(Operator::Contains.matches(&haystack, &lower));
+        }
+
+        #[test]
+        fn parse_user_input_roundtrips_numbers_and_booleans(
+            num: i32,
+            frac in 0_u16..10_000_u16,
+            use_comma: bool,
+            flag: bool,
+            pad_left in "[ \t]{0,3}",
+            pad_right in "[ \t]{0,3}",
+        ) {
+            let value = num as f64 + (frac as f64 / 10_000.0) * if num < 0 { -1.0 } else { 1.0 };
+            let formatted = if use_comma {
+                format!("{pad_left}{value:.4}{pad_right}").replace('.', ",")
+            } else {
+                format!("{pad_left}{value:.4}{pad_right}")
+            };
+            match FactValue::parse_user_input(&formatted) {
+                FactValue::Number(parsed) => prop_assert!((parsed - value).abs() < 1e-3),
+                other => prop_assert!(false, "expected Number, got {other:?}"),
+            }
+
+            let bool_raw = format!("{pad_left}{}{pad_right}", if flag { "TrUe" } else { "FaLsE" });
+            prop_assert_eq!(FactValue::parse_user_input(&bool_raw), FactValue::Bool(flag));
+        }
+
+        #[test]
+        fn fact_new_always_clamps_cf(cf in -10.0_f64..10.0_f64) {
+            let fact = Fact::new("k", FactValue::Bool(true), "src", cf, FactOrigin::Manual);
+            prop_assert!((0.0..=1.0).contains(&fact.cf));
+        }
+
+        #[test]
+        fn rule_new_enforces_cf_bounds(cf in -5.0_f64..5.0_f64) {
+            let cond = vec![Condition {
+                fact: "x".into(),
+                op: Operator::Eq,
+                value: FactValue::Bool(true),
+            }];
+            let res = Rule::new(
+                "R1".into(),
+                "Rule".into(),
+                String::new(),
+                0,
+                Severity::Info,
+                cf,
+                cond,
+                None,
+                "Rec".into(),
+            );
+            prop_assert_eq!(res.is_ok(), (0.0..=1.0).contains(&cf));
+        }
+
+        #[test]
+        fn forward_chaining_propagates_arbitrary_length_chain_and_preserves_ordering(
+            chain_len in 1_usize..=12,
+            base_cf in 0.1_f64..=1.0_f64,
+            rule_cfs in prop::collection::vec(0.1_f64..=1.0_f64, 12),
+            priorities in prop::collection::vec(any::<i32>(), 12),
+            severities in prop::collection::vec(arb_severity(), 12),
+        ) {
+            let mut rules = Vec::with_capacity(chain_len);
+            for i in 0..chain_len {
+                let rule = Rule::new(
+                    format!("R_{i:02}"),
+                    format!("Step {i}"),
+                    String::new(),
+                    priorities[i],
+                    severities[i],
+                    rule_cfs[i],
+                    vec![Condition {
+                        fact: format!("step_{i}"),
+                        op: Operator::Eq,
+                        value: FactValue::Bool(true),
+                    }],
+                    Some(DerivedFactSpec {
+                        key: format!("step_{}", i + 1),
+                        value: FactValue::Bool(true),
+                    }),
+                    format!("Action {i}"),
+                )
+                .unwrap();
+                rules.push(rule);
+            }
+
+            // Перевертаємо порядок правил, щоб перевірити незалежність прямого виводу від порядку в БЗ
+            rules.reverse();
+            let kb = KnowledgeBase::new(rules).unwrap();
+            let engine = InferenceEngine::new(kb);
+
+            let mut base_facts = BTreeMap::new();
+            base_facts.insert(
+                "step_0".to_string(),
+                Fact::new("step_0", FactValue::Bool(true), "test", base_cf, FactOrigin::WebAgent),
+            );
+
+            let res = engine.evaluate(&base_facts);
+            prop_assert!(res.iterations <= chain_len + 2);
+            prop_assert_eq!(res.decisions.len(), chain_len);
+            prop_assert_eq!(res.inferred_facts.len(), chain_len);
+
+            let expected_ids: Vec<String> = res.decisions.iter().map(|d| d.rule_id.clone()).collect();
+            prop_assert_eq!(res.fired_rule_ids, expected_ids);
+
+            // Кожне виведене правило має очікуваний добуток CF уздовж ланцюжка
+            let mut running_cf = base_cf;
+            for i in 0..chain_len {
+                running_cf = (running_cf * rule_cfs[i]).clamp(0.0, 1.0);
+                let derived = &res.inferred_facts[&format!("step_{}", i + 1)];
+                prop_assert!((derived.cf - running_cf).abs() < 1e-12);
+                prop_assert_eq!(derived.origin, FactOrigin::Inferred);
+            }
+
+            // Рішення строго відсортовані за (severity desc, priority desc, cf desc, rule_id asc)
+            for pair in res.decisions.windows(2) {
+                let (a, b) = (&pair[0], &pair[1]);
+                let ord = b
+                    .severity
+                    .cmp(&a.severity)
+                    .then_with(|| b.priority.cmp(&a.priority))
+                    .then_with(|| b.cf.total_cmp(&a.cf))
+                    .then_with(|| a.rule_id.cmp(&b.rule_id));
+                prop_assert!(ord != std::cmp::Ordering::Greater);
+            }
+        }
+
+        #[test]
+        fn duplicate_consequent_rules_combine_cf_via_mycin(
+            fact_cf in 0.1_f64..=1.0_f64,
+            cf1 in 0.1_f64..=1.0_f64,
+            cf2 in 0.1_f64..=1.0_f64,
+        ) {
+            let make_rule = |id: &str, cf: f64| {
+                Rule::new(
+                    id.into(),
+                    id.into(),
+                    String::new(),
+                    10,
+                    Severity::High,
+                    cf,
+                    vec![Condition {
+                        fact: "signal".into(),
+                        op: Operator::Eq,
+                        value: FactValue::Bool(true),
+                    }],
+                    Some(DerivedFactSpec {
+                        key: "risk".into(),
+                        value: FactValue::Text("elevated".into()),
+                    }),
+                    "Act".into(),
+                )
+                .unwrap()
+            };
+
+            let kb = KnowledgeBase::new(vec![make_rule("R1", cf1), make_rule("R2", cf2)]).unwrap();
+            let engine = InferenceEngine::new(kb);
+
+            let mut facts = BTreeMap::new();
+            facts.insert(
+                "signal".into(),
+                Fact::new("signal", FactValue::Bool(true), "test", fact_cf, FactOrigin::WebAgent),
+            );
+
+            let res = engine.evaluate(&facts);
+            let expected_cf = InferenceEngine::combine_cf(fact_cf * cf1, fact_cf * cf2);
+            let actual_cf = res.inferred_facts["risk"].cf;
+            prop_assert!((actual_cf - expected_cf).abs() < 1e-12);
+        }
+    }
+}

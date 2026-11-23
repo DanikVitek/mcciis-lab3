@@ -87,7 +87,8 @@ impl RetryPolicy {
         let secs = self
             .initial_backoff_secs
             .saturating_mul(factor)
-            .min(self.max_backoff_secs);
+            .min(self.max_backoff_secs)
+            .min(i64::MAX as u64);
         Duration::seconds(secs as i64)
     }
 }
@@ -192,5 +193,125 @@ impl SourceHealth {
         self.last_error = None;
         self.last_error_kind = None;
         self.next_retry_at = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #[test]
+        fn retry_policy_validation_matches_invariants(
+            max_retries: u32,
+            initial: u64,
+            max_backoff: u64,
+        ) {
+            let res = RetryPolicy::new(max_retries, initial, max_backoff);
+            let expected_ok = max_retries > 0 && max_backoff >= initial;
+            prop_assert_eq!(res.is_ok(), expected_ok);
+        }
+
+        #[test]
+        fn backoff_is_monotonic_and_bounded(
+            max_retries: u32,
+            a: u64,
+            b: u64,
+            a1: u32,
+            a2: u32,
+        ) {
+            let max_retries = max_retries.max(1);
+            let initial = a.min(b);
+            let max_backoff = a.max(b);
+            let policy = RetryPolicy::new(max_retries, initial, max_backoff).unwrap();
+
+            let (lo, hi) = (a1.min(a2), a1.max(a2));
+            let b_lo = policy.backoff_for_attempt(lo).whole_seconds();
+            let b_hi = policy.backoff_for_attempt(hi).whole_seconds();
+
+            let expected_min = initial.min(i64::MAX as u64) as i64;
+            let expected_max = max_backoff.min(i64::MAX as u64) as i64;
+
+            prop_assert!(b_lo >= expected_min);
+            prop_assert!(b_lo <= expected_max);
+            prop_assert!(b_hi >= b_lo);
+            prop_assert!(b_hi <= expected_max);
+        }
+
+        #[test]
+        fn parse_errors_throttle_then_disable_exactly_at_threshold(
+            max_retries in 1_u32..=10,
+            initial: u32,
+            extra: u32,
+        ) {
+            let initial = u64::from(initial.max(1));
+            let max_backoff = initial + u64::from(extra);
+            let policy = RetryPolicy::new(max_retries, initial, max_backoff).unwrap();
+            let mut health = SourceHealth::default();
+            let mut now = OffsetDateTime::UNIX_EPOCH + Duration::days(10_000);
+
+            for attempt in 1..max_retries {
+                let tr = health.record_failure(now, ErrorKind::Parse, "parse err".into(), &policy);
+                match tr {
+                    FailureTransition::Throttled {
+                        attempt: a,
+                        backoff_secs,
+                    } => {
+                        prop_assert_eq!(a, attempt);
+                        prop_assert!(backoff_secs >= initial as i64);
+                        prop_assert!(backoff_secs <= max_backoff as i64);
+                        prop_assert!(!health.disabled);
+                        prop_assert!(health.is_throttled(now));
+                        prop_assert!(!health.should_poll(now));
+                        prop_assert!(health.should_poll(now + Duration::seconds(backoff_secs)));
+                        now += Duration::seconds(backoff_secs);
+                    }
+                    FailureTransition::Disabled { .. } => {
+                        prop_assert!(false, "disabled too early on attempt {attempt}/{max_retries}");
+                    }
+                }
+            }
+
+            let final_tr = health.record_failure(now, ErrorKind::Parse, "parse err".into(), &policy);
+            prop_assert_eq!(final_tr, FailureTransition::Disabled { attempts: max_retries });
+            prop_assert!(health.disabled);
+            prop_assert!(!health.is_throttled(now));
+            prop_assert!(!health.should_poll(now + Duration::days(365)));
+
+            health.reset_manual();
+            prop_assert!(!health.disabled);
+            prop_assert_eq!(health.consecutive_failures, 0);
+            prop_assert!(health.should_poll(now));
+        }
+
+        #[test]
+        fn transient_errors_never_permanently_disable_source(
+            max_retries: u32,
+            initial: u32,
+            extra: u32,
+            failures in 1_usize..=25,
+        ) {
+            let initial = u64::from(initial);
+            let max_backoff = initial + u64::from(extra);
+            let policy = RetryPolicy::new(max_retries.max(1), initial, max_backoff).unwrap();
+            let mut health = SourceHealth::default();
+            let base = OffsetDateTime::UNIX_EPOCH + Duration::days(10_000);
+
+            for i in 0..failures {
+                let now = base + Duration::seconds((i as i64) * 1000);
+                let tr = health.record_failure(now, ErrorKind::Transient, "timeout".into(), &policy);
+                let is_throttled = matches!(tr, FailureTransition::Throttled { .. });
+                prop_assert!(is_throttled);
+                prop_assert!(!health.disabled);
+            }
+
+            health.record_success(base + Duration::days(1));
+            prop_assert!(!health.disabled);
+            prop_assert_eq!(health.consecutive_failures, 0);
+            prop_assert!(health.last_error.is_none());
+            prop_assert!(health.should_poll(base + Duration::days(1)));
+        }
     }
 }

@@ -95,3 +95,87 @@ pub fn parse_nbu_json(
     let raw_entries: Vec<RawNbuEntry> = serde_json::from_str(json_str)?;
     Ok(extract_configured_rates(raw_entries, cfg, previous))
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #[test]
+        fn parse_nbu_json_filters_orders_and_computes_deltas(
+            usd_prev in 1.0_f64..100.0_f64,
+            usd_curr in 1.0_f64..100.0_f64,
+            eur_curr in 1.0_f64..100.0_f64,
+            pln_curr in 1.0_f64..100.0_f64,
+        ) {
+            let cfg = NbuMetricsConfig {
+                enabled: true,
+                url: "http://mock.local/nbu".into(),
+                currencies: vec!["EUR".into(), "USD".into()],
+            };
+
+            let prev = vec![CurrencyRate {
+                cc: "USD".into(),
+                txt: "Долар США".into(),
+                rate: usd_prev,
+                previous_rate: None,
+                delta_pct: None,
+                exchangedate: "22.11.2026".into(),
+            }];
+
+            // Навмисно подаємо у зворотному порядку, у нижньому регістрі та із зайвою валютою PLN
+            let json = serde_json::json!([
+                { "cc": "pln", "txt": "Злотий", "rate": pln_curr, "exchangedate": "23.11.2026" },
+                { "cc": "usd", "txt": "Долар США", "rate": usd_curr, "exchangedate": "23.11.2026" },
+                { "cc": "eur", "txt": "Євро", "rate": eur_curr, "exchangedate": "23.11.2026" },
+            ])
+            .to_string();
+
+            let parsed = parse_nbu_json(&json, &cfg, &prev).unwrap();
+
+            // Відфільтровано PLN і збережено порядок конфігурації [EUR, USD]
+            prop_assert_eq!(parsed.len(), 2);
+            prop_assert_eq!(parsed[0].cc.as_str(), "EUR");
+            prop_assert_eq!(parsed[1].cc.as_str(), "USD");
+
+            // Для EUR не було попереднього значення -> delta_pct == None
+            prop_assert!(parsed[0].previous_rate.is_none());
+            prop_assert!(parsed[0].delta_pct.is_none());
+
+            // Для USD обчислено точну відсоткову дельту з округленням до 4 знаків
+            let expected_delta =
+                ((((usd_curr - usd_prev) / usd_prev) * 100.0) * 10_000.0).round() / 10_000.0;
+            prop_assert_eq!(parsed[1].previous_rate, Some(usd_prev));
+            prop_assert!((parsed[1].delta_pct.unwrap() - expected_delta).abs() < 1e-9);
+        }
+
+        #[test]
+        fn zero_previous_rate_produces_none_delta_without_nan_or_inf(
+            curr in 0.01_f64..1000.0_f64,
+        ) {
+            let cfg = NbuMetricsConfig {
+                enabled: true,
+                url: "http://mock.local/nbu".into(),
+                currencies: vec!["USD".into()],
+            };
+            let prev = vec![CurrencyRate {
+                cc: "USD".into(),
+                txt: "USD".into(),
+                rate: 0.0,
+                previous_rate: None,
+                delta_pct: None,
+                exchangedate: "22.11.2026".into(),
+            }];
+            let json = serde_json::json!([
+                { "cc": "USD", "txt": "USD", "rate": curr, "exchangedate": "23.11.2026" },
+            ])
+            .to_string();
+
+            let parsed = parse_nbu_json(&json, &cfg, &prev).unwrap();
+            prop_assert_eq!(parsed.len(), 1);
+            prop_assert!(parsed[0].delta_pct.is_none());
+        }
+    }
+}
