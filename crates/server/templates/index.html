@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}Головна панель{% endblock %}
+
+{% block content %}
+<div class="cards">
+  <div class="card">
+    <div class="label">Цикл моніторингу</div>
+    <div class="value">#{{ poll_count }}</div>
+    <div class="sub">{{ last_poll_at }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Змінені HTTP-сайти</div>
+    <div class="value">{{ changed_sites.len() }}</div>
+    <div class="sub">з {{ all_sites.len() }} контрольованих</div>
+  </div>
+  <div class="card">
+    <div class="label">Відібрані новини</div>
+    <div class="value">{{ articles.len() }}</div>
+    <div class="sub">відсортовано за релевантністю</div>
+  </div>
+  <div class="card">
+    <div class="label">Факти в БЗ ІСППР</div>
+    <div class="value">{{ total_facts }}</div>
+    <div class="sub">рішень: {{ total_decisions }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Режим ІСППР</div>
+    <div class="value" style="font-size:1.15rem">{{ operational_mode }}</div>
+    <div class="sub">вимкнено джерел: {{ disabled_count }}, backoff: {{ throttled_count }}</div>
+  </div>
+</div>
+
+{% if !health_alerts.is_empty() %}
+<div class="{% if disabled_count > 0 %}alert-box{% else %}alert-box warn{% endif %}">
+  <strong>Стан відмовостійкості джерел (вимкнені або в режимі експоненційного backoff):</strong>
+  {% for alert in health_alerts %}
+  <div class="alert-item">
+    <div>
+      <strong>[{{ alert.kind_label }}] {{ alert.name }}</strong> — <span class="mono">{{ alert.status_text }}</span>
+      <br><span class="muted">{{ alert.error_kind }}: {{ alert.error_message }}</span>
+    </div>
+    <form class="inline-form" method="post" action="{{ alert.enable_action }}">
+      <button type="submit" class="btn btn-sm">Скинути / Увімкнути</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<section>
+  <h2>
+    <span>1. HTTP/HTTPS-сайти, на яких виявлено непереглянуті зміни</span>
+    <span class="muted">Перевірка за розміром ресурсу та SHA-256</span>
+  </h2>
+  {% if changed_sites.is_empty() %}
+  <p class="muted">Непереглянутих змін на HTTP/HTTPS-сайтах наразі немає. Сайти з'являться тут автоматично при наступній зміні.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Сайт</th>
+          <th>Категорія</th>
+          <th>HTTP</th>
+          <th>Розмір (байти)</th>
+          <th>Зміна розміру</th>
+          <th>Час зміни</th>
+          <th>Дія</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for site in changed_sites %}
+        <tr>
+          <td>
+            <strong>{{ site.name }}</strong><br>
+            <a class="mono" href="{{ site.url }}" target="_blank" rel="noopener">{{ site.url }}</a>
+          </td>
+          <td><span class="badge badge-group">{{ site.category }}</span></td>
+          <td class="mono">{{ site.status_code }}</td>
+          <td class="mono">{{ site.size }}</td>
+          <td class="mono">{{ site.delta }}</td>
+          <td class="mono">{{ site.changed_at }}</td>
+          <td>
+            <form class="inline-form" method="post" action="/sites/{{ site.id }}/ack">
+              <button type="submit" class="btn btn-sm">Позначити як переглянуто</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <details>
+    <summary>Показати всі контрольовані HTTP/HTTPS-сайти (разом із переглянутими)</summary>
+    <div class="table-wrap" style="margin-top:0.6rem">
+      <table>
+        <thead>
+          <tr>
+            <th>Сайт</th>
+            <th>Стан</th>
+            <th>Розмір</th>
+            <th>Остання перевірка</th>
+            <th>Керування</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for site in all_sites %}
+          <tr>
+            <td><strong>{{ site.name }}</strong><br><span class="mono muted">{{ site.url }}</span></td>
+            <td><span class="badge {{ site.status_badge_class }}">{{ site.status_badge_text }}</span></td>
+            <td class="mono">{{ site.size }}</td>
+            <td class="mono">{{ site.last_checked }}</td>
+            <td>
+              {% if site.disabled %}
+              <form class="inline-form" method="post" action="/sites/{{ site.id }}/enable">
+                <button type="submit" class="btn btn-sm">Увімкнути</button>
+              </form>
+              {% else if site.acknowledged %}
+              <form class="inline-form" method="post" action="/sites/{{ site.id }}/unack">
+                <button type="submit" class="btn btn-secondary btn-sm">Повернути до змін</button>
+              </form>
+              {% else %}
+              —
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+</section>
+
+<section>
+  <h2>
+    <span>2. Відібрані повідомлення зі стрічок новин (ранжовані за релевантністю)</span>
+    <span class="muted">Натисніть на заголовок, щоб відкрити повідомлення у браузері</span>
+  </h2>
+  {% if articles.is_empty() %}
+  <p class="muted">Новин за заданими критеріями поки не знайдено або триває початковий збір.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Рейтинг</th>
+          <th>Група</th>
+          <th>Заголовок новини</th>
+          <th>Знайдені ключові слова / CVE</th>
+          <th>Джерело</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for article in articles %}
+        <tr>
+          <td class="mono"><strong>{{ article.score }}</strong></td>
+          <td><span class="badge badge-group">{{ article.group }}</span></td>
+          <td>
+            <a href="/article/{{ article.id }}"><strong>{{ article.title }}</strong></a>
+            {% if !article.published.is_empty() %}
+            <br><span class="muted">{{ article.published }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% for kw in article.keywords %}
+            <span class="badge badge-kw" title="{{ kw.tooltip }}">{{ kw.word }}</span>
+            {% endfor %}
+            {% for cve in article.cves %}
+            <span class="badge badge-cve">{{ cve }}</span>
+            {% endfor %}
+          </td>
+          <td class="muted">{{ article.feed_name }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
+<section>
+  <h2>
+    <span>3. Динамічні числові показники (API НБУ) та підсумок ІСППР</span>
+    <a class="btn btn-sm" href="/dss.html">Відкрити повну панель ІСППР →</a>
+  </h2>
+  {% if !currencies.is_empty() %}
+  <div class="table-wrap" style="margin-bottom:1rem">
+    <table>
+      <thead>
+        <tr><th>Валюта</th><th>Назва</th><th>Курс (грн)</th><th>Зміна (%)</th><th>Дата НБУ</th></tr>
+      </thead>
+      <tbody>
+        {% for cur in currencies %}
+        <tr>
+          <td class="mono"><strong>{{ cur.cc }}</strong></td>
+          <td>{{ cur.txt }}</td>
+          <td class="mono">{{ cur.rate }}</td>
+          <td class="mono">{{ cur.delta }}</td>
+          <td class="mono">{{ cur.exchangedate }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if top_decisions.is_empty() %}
+  <p class="muted">Активних рішень ІСППР ще немає.</p>
+  {% else %}
+  {% for dec in top_decisions %}
+  <div class="decision-card {{ dec.severity_class }}">
+    <div>
+      <span class="badge {{ dec.severity_class }}">{{ dec.severity_label }}</span>
+      <strong>{{ dec.rule_name }}</strong>
+      <span class="mono muted">({{ dec.rule_id }}, CF = {{ dec.cf }})</span>
+    </div>
+    <div style="margin-top:0.35rem">{{ dec.recommendation }}</div>
+  </div>
+  {% endfor %}
+  {% endif %}
+</section>
+
+{% if !recent_logs.is_empty() %}
+<section>
+  <h2><span>Журнал подій Web-агента</span></h2>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        {% for entry in recent_logs %}
+        <tr>
+          <td class="mono muted" style="white-space:nowrap">{{ entry.timestamp }}</td>
+          <td>{{ entry.message }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

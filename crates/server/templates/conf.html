@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Конфігурація Web-агента{% endblock %}
+
+{% block content %}
+<section>
+  <h2><span>Параметри сервера та політика відмовостійкості</span></h2>
+  <div class="table-wrap">
+    <table>
+      <tbody>
+        <tr><th>Адреса Web-інтерфейсу</th><td class="mono">{{ bind_addr }}</td></tr>
+        <tr><th>Інтервал фонового опитування</th><td class="mono">{{ poll_interval_secs }} с</td></tr>
+        <tr><th>Таймаут HTTP-запитів</th><td class="mono">{{ request_timeout_secs }} с</td></tr>
+        <tr><th>Максимум паралельних запитів</th><td class="mono">{{ max_concurrent_requests }}</td></tr>
+        <tr>
+          <th>Політика повторів (backoff / parse circuit breaker)</th>
+          <td class="mono">parse_max_retries = {{ parse_max_retries }}, initial_backoff = {{ initial_backoff_secs }} с, max_backoff = {{ max_backoff_secs }} с</td>
+        </tr>
+        <tr>
+          <th>Логування сервера (append-only файл з ротацією)</th>
+          <td class="mono">{{ log_dir }}/{{ log_prefix }} • ротація: {{ log_rotation }} • max_files = {{ log_max_files }}</td>
+        </tr>
+        <tr><th>Файл правил БЗ ІСППР</th><td class="mono">{{ rules_path }}</td></tr>
+        <tr><th>Файл збереження стану</th><td class="mono">{{ state_path }}</td></tr>
+        <tr><th>API НБУ</th><td class="mono">{{ nbu_status }} • {{ nbu_url }} ({{ nbu_currencies }})</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span>Контрольовані HTTP/HTTPS-сайти ({{ sites.len() }})</span></h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ID</th><th>Назва</th><th>Категорія</th><th>URL</th></tr></thead>
+      <tbody>
+        {% for s in sites %}
+        <tr>
+          <td class="mono">{{ s.id }}</td>
+          <td>{{ s.name }}</td>
+          <td><span class="badge badge-group">{{ s.category }}</span></td>
+          <td class="mono">{{ s.url }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span>Стрічки новин та критерії відбору ({{ feeds.len() }})</span></h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ID</th><th>Стрічка</th><th>Група</th><th>Ключові слова (вага)</th></tr></thead>
+      <tbody>
+        {% for f in feeds %}
+        <tr>
+          <td class="mono">{{ f.id }}</td>
+          <td><strong>{{ f.name }}</strong><br><span class="mono muted">{{ f.url }}</span></td>
+          <td><span class="badge badge-group">{{ f.group }}</span></td>
+          <td>{{ f.keywords_summary }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span>Канонічний файл конфігурації (TOML)</span></h2>
+  <pre class="code">{{ pretty_toml }}</pre>
+</section>
+{% endblock %}

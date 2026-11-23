@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<p><a class="btn btn-secondary btn-sm" href="/index.html">← Назад до списку новин</a></p>
+<section>
+  <h2><span>{{ title }}</span></h2>
+  <p class="muted">
+    Група: <span class="badge badge-group">{{ group }}</span> •
+    Джерело: <strong>{{ feed_name }}</strong> •
+    Опубліковано: {{ published }} •
+    Рейтинг релевантності: <strong>{{ score }}</strong>
+  </p>
+  <p>
+    Виявлені CVE:
+    {% if cves.is_empty() %}
+    <span class="muted">CVE не виявлено</span>
+    {% else %}
+    {% for cve in cves %}<span class="badge badge-cve">{{ cve }}</span>{% endfor %}
+    {% endif %}
+  </p>
+  <div style="background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:1rem;margin:1rem 0;">
+    {% if summary.is_empty() %}
+    <span class="muted">Повний текст опису відсутній у стрічці.</span>
+    {% else %}
+    {{ summary }}
+    {% endif %}
+  </div>
+  {% if !link.is_empty() %}
+  <p><a class="btn" href="{{ link }}" target="_blank" rel="noopener">Перейти до оригіналу статті ↗</a></p>
+  {% endif %}
+</section>
+
+<section>
+  <h2><span>Деталізація оцінки релевантності</span></h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Ключове слово</th><th>Вага</th><th>У заголовку</th><th>В описі</th><th>Внесок</th></tr>
+      </thead>
+      <tbody>
+        {% for kw in keywords %}
+        <tr>
+          <td><strong>{{ kw.word }}</strong></td>
+          <td class="mono">{{ kw.weight }}</td>
+          <td>{{ kw.in_title }}</td>
+          <td>{{ kw.in_body }}</td>
+          <td class="mono">+{{ kw.contribution }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

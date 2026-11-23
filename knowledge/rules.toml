@@ -1,0 +1,193 @@
+# База продукційних правил ІСППР (Forward Chaining + MYCIN Certainty Factors)
+# Рівень 1: правила інтерпретації первинних фактів, зібраних Web-агентом
+# Рівень 2: інтегральні мета-правила, що використовують виведені факти (ланцюговий вивід)
+
+[[rules]]
+id = "R_CYBER_CRITICAL"
+name = "Критичний рівень кіберзагроз (виявлено CVE або критичні бюлетені)"
+description = "Активація при наявності згадок CVE та критичних статей у стрічках кібербезпеки."
+priority = 100
+severity = "critical"
+cf = 0.90
+conditions = [
+  { fact = "cve_mentions_count", op = "gte", value = 1.0 },
+  { fact = "cyber_critical_articles", op = "gte", value = 1.0 },
+]
+derived_fact = { key = "cyber_threat_level", value = "critical" }
+recommendation = "Негайно провести аудит інфраструктури на наявність виявлених CVE та застосувати актуальні патчі безпеки згідно з бюлетенями CISA."
+
+[[rules]]
+id = "R_CYBER_HIGH"
+name = "Високий потік подій кібербезпеки"
+description = "Виявлено 3 або більше релевантних повідомлень у групі кібербезпеки."
+priority = 90
+severity = "high"
+cf = 0.82
+conditions = [
+  { fact = "cyber_articles_count", op = "gte", value = 3.0 },
+]
+derived_fact = { key = "cyber_threat_level", value = "high" }
+recommendation = "Посилити моніторинг журналів безпеки та перевірити опубліковані рекомендації CISA та профільних джерел."
+
+[[rules]]
+id = "R_CYBER_ELEVATED"
+name = "Помірна активність у сфері кібербезпеки"
+description = "Виявлено окремі релевантні повідомлення з кібербезпеки."
+priority = 70
+severity = "medium"
+cf = 0.68
+conditions = [
+  { fact = "cyber_articles_count", op = "gte", value = 1.0 },
+  { fact = "cyber_articles_count", op = "lt", value = 3.0 },
+]
+derived_fact = { key = "cyber_threat_level", value = "elevated" }
+recommendation = "Виконати плановий перегляд виявлених повідомлень із кібербезпеки в інтерфейсі Web-агента."
+
+[[rules]]
+id = "R_CYBER_NORMAL"
+name = "Штатний стан кібербезпеки"
+description = "У поточному зрізі релевантних інцидентів кібербезпеки не зафіксовано."
+priority = 60
+severity = "info"
+cf = 0.85
+conditions = [
+  { fact = "cyber_articles_count", op = "eq", value = 0.0 },
+]
+derived_fact = { key = "cyber_threat_level", value = "normal" }
+recommendation = "Критичних кіберзагроз за заданими критеріями не знайдено — підтримувати стандартний графік моніторингу."
+
+[[rules]]
+id = "R_FX_USD_HIGH"
+name = "Підвищений офіційний курс USD (НБУ)"
+description = "Офіційний курс долара США перевищив встановлений поріг 41.00 грн."
+priority = 80
+severity = "medium"
+cf = 0.80
+conditions = [
+  { fact = "nbu_rate_usd", op = "gte", value = 41.0 },
+]
+derived_fact = { key = "fx_pressure_level", value = "elevated" }
+recommendation = "Врахувати підвищений курс USD при плануванні витрат на хмарну інфраструктуру, ліцензії та імпортне обладнання."
+
+[[rules]]
+id = "R_FX_EUR_HIGH"
+name = "Підвищений офіційний курс EUR (НБУ)"
+description = "Офіційний курс євро перевищив встановлений поріг 44.00 грн."
+priority = 80
+severity = "medium"
+cf = 0.80
+conditions = [
+  { fact = "nbu_rate_eur", op = "gte", value = 44.0 },
+]
+derived_fact = { key = "fx_pressure_level", value = "elevated" }
+recommendation = "Переглянути валютний резерв та умови розрахунків за контрактами, номінованими в EUR."
+
+[[rules]]
+id = "R_FX_VOLATILE"
+name = "Підвищена волатильність валютних курсів"
+description = "Максимальна зміна курсу валют між опитуваннями досягла або перевищила 0.5%."
+priority = 85
+severity = "high"
+cf = 0.86
+conditions = [
+  { fact = "nbu_max_abs_delta_pct", op = "gte", value = 0.5 },
+]
+derived_fact = { key = "fx_volatility", value = "high" }
+recommendation = "Зафіксовано помітну зміну курсів НБУ — рекомендовано призупинити некритичні валютні операції до стабілізації."
+
+[[rules]]
+id = "R_ECON_NEWS_ACTIVE"
+name = "Висока активність макроекономічних новин"
+description = "У новинних стрічках виявлено 2 або більше релевантних економічних/енергетичних повідомлень."
+priority = 75
+severity = "medium"
+cf = 0.74
+conditions = [
+  { fact = "econ_articles_count", op = "gte", value = 2.0 },
+]
+derived_fact = { key = "macro_news_activity", value = "high" }
+recommendation = "Ознайомитися з добіркою макроекономічних та енергетичних новин для оцінки непрямого впливу на операційну діяльність."
+
+[[rules]]
+id = "R_HTTP_CHANGES"
+name = "Виявлено непереглянуті зміни на контрольованих Web-сайтах"
+description = "Один або більше сайтів зі списку моніторингу змінили розмір або вміст."
+priority = 75
+severity = "info"
+cf = 0.95
+conditions = [
+  { fact = "http_changed_sites_count", op = "gte", value = 1.0 },
+]
+derived_fact = { key = "web_environment_state", value = "changed" }
+recommendation = "Перевірити таблицю змінених HTTP/HTTPS-сайтів на головній сторінці та позначити переглянуті ресурси."
+
+[[rules]]
+id = "R_HIGH_RELEVANCE_ARTICLE"
+name = "Знайдено високорелевантне повідомлення"
+description = "Максимальна оцінка релевантності новини перевищує поріг 6.0 балів."
+priority = 82
+severity = "high"
+cf = 0.83
+conditions = [
+  { fact = "top_article_score", op = "gte", value = 6.0 },
+]
+derived_fact = { key = "priority_signal", value = "detected" }
+recommendation = "Першочергово переглянути найвище проранжовану новину в таблиці Web-агента."
+
+# --- Рівень 2: Мета-правила (ланцюговий вивід на основі виведених фактів) ---
+
+[[rules]]
+id = "R_META_CRISIS_MODE"
+name = "Комплексний кризовий режим (кіберзагрози + валютний тиск)"
+description = "Одночасна наявність критичного рівня кіберзагроз та підвищеного валютного тиску."
+priority = 120
+severity = "critical"
+cf = 0.92
+conditions = [
+  { fact = "cyber_threat_level", op = "eq", value = "critical" },
+  { fact = "fx_pressure_level", op = "eq", value = "elevated" },
+]
+derived_fact = { key = "operational_mode", value = "crisis_response" }
+recommendation = "Активувати комплексний протокол реагування: пріоритетне усунення вразливостей безпеки та контроль критичних витрат у валюті."
+
+[[rules]]
+id = "R_META_ENHANCED_CYBER"
+name = "Режим посиленого моніторингу ІТ-середовища"
+description = "Високий рівень кіберподій збігся зі змінами на контрольованих HTTP/HTTPS-ресурсах."
+priority = 110
+severity = "high"
+cf = 0.85
+conditions = [
+  { fact = "cyber_threat_level", op = "eq", value = "high" },
+  { fact = "web_environment_state", op = "eq", value = "changed" },
+]
+derived_fact = { key = "operational_mode", value = "enhanced_monitoring" }
+recommendation = "Рекомендовано скоротити інтервал опитування Web-агента та перевірити всі оновлені джерела кібербезпеки."
+
+[[rules]]
+id = "R_META_ECON_WATCH"
+name = "Посилений фінансово-економічний моніторинг"
+description = "Підвищені курси валют супроводжуються високою активністю економічних новин."
+priority = 105
+severity = "high"
+cf = 0.81
+conditions = [
+  { fact = "fx_pressure_level", op = "eq", value = "elevated" },
+  { fact = "macro_news_activity", op = "eq", value = "high" },
+]
+derived_fact = { key = "operational_mode", value = "financial_watch" }
+recommendation = "Посилити фінансовий контроль та регулярно звіряти динаміку курсів НБУ з новинним фоном."
+
+[[rules]]
+id = "R_META_ROUTINE"
+name = "Штатний операційний режим"
+description = "Відсутні кіберінциденти та непереглянуті зміни веб-сайтів."
+priority = 50
+severity = "info"
+cf = 0.85
+conditions = [
+  { fact = "cyber_threat_level", op = "eq", value = "normal" },
+  { fact = "http_changed_sites_count", op = "eq", value = 0.0 },
+]
+derived_fact = { key = "operational_mode", value = "routine" }
+recommendation = "Інформаційне середовище стабільне — продовжувати фоновий моніторинг у штатному режимі."

@@ -1,0 +1,25 @@
+[package]
+name = "web-agent"
+version.workspace = true
+edition.workspace = true
+description = "Autonomous Intelligent Web-Agent (HTTP monitoring, RSS/Atom ranking, NBU metrics, DSS KB fact population)"
+
+[dependencies]
+dss.workspace = true
+feed-rs.workspace = true
+hashbrown.workspace = true
+hex.workspace = true
+html-escape.workspace = true
+html2text.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true

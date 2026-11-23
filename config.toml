@@ -1,0 +1,120 @@
+[server]
+bind_addr = "127.0.0.1:8080"
+poll_interval_secs = 300
+request_timeout_secs = 15
+max_concurrent_requests = 8
+
+[server.retry_policy]
+parse_max_retries = 3
+initial_backoff_secs = 30
+max_backoff_secs = 1800
+
+[logging]
+dir = "logs"
+file_prefix = "web-agent-server.log"
+rotation = "daily"
+max_files = 7
+
+[dss]
+rules_path = "knowledge/rules.toml"
+state_path = "data/state.json"
+
+[nbu_metrics]
+enabled = true
+url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json"
+currencies = ["USD", "EUR", "PLN", "GBP"]
+
+# HTTP/HTTPS сайти для моніторингу змін (п. 3: перевірка розміру ресурсу + хешу вмісту)
+[[http_sites]]
+id = "example-http"
+name = "Example.com (HTTP порт 80)"
+url = "http://example.com/"
+category = "test-http"
+
+[[http_sites]]
+id = "cisa-xml"
+name = "CISA Cybersecurity Advisories Feed"
+url = "https://www.cisa.gov/cybersecurity-advisories/all.xml"
+category = "cybersecurity"
+
+[[http_sites]]
+id = "hn-frontpage"
+name = "Hacker News Frontpage RSS"
+url = "https://hnrss.org/frontpage"
+category = "tech-news"
+
+[[http_sites]]
+id = "nbu-rates"
+name = "API НБУ — офіційний курс валют (JSON)"
+url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json"
+category = "economics"
+
+# Стрічки новин (RSS/Atom) з групами та ключовими словами для відбору і ранжування
+[[news_feeds]]
+id = "cisa-advisories"
+name = "CISA Cybersecurity Advisories"
+group = "cybersecurity"
+url = "https://www.cisa.gov/cybersecurity-advisories/all.xml"
+keywords = [
+  { word = "critical", weight = 3.0 },
+  { word = "zero-day", weight = 3.5 },
+  { word = "ransomware", weight = 3.0 },
+  { word = "vulnerability", weight = 2.0 },
+  { word = "exploit", weight = 2.5 },
+  { word = "cve", weight = 2.5 },
+  { word = "advisory", weight = 1.5 },
+  { word = "ics", weight = 1.5 },
+  { word = "patch", weight = 1.5 },
+  { word = "rce", weight = 3.0 },
+]
+
+[[news_feeds]]
+id = "hacker-news"
+name = "Hacker News"
+group = "tech-security"
+url = "https://hnrss.org/frontpage"
+keywords = [
+  { word = "security", weight = 2.5 },
+  { word = "vulnerability", weight = 2.5 },
+  { word = "rust", weight = 2.0 },
+  { word = "ai", weight = 1.5 },
+  { word = "llm", weight = 1.5 },
+  { word = "linux", weight = 1.5 },
+  { word = "kernel", weight = 2.0 },
+  { word = "breach", weight = 3.0 },
+  { word = "database", weight = 1.5 },
+  { word = "open source", weight = 1.5 },
+]
+
+[[news_feeds]]
+id = "rust-blog"
+name = "Official Rust Blog"
+group = "rust-ecosystem"
+url = "https://blog.rust-lang.org/feed.xml"
+keywords = [
+  { word = "security", weight = 3.0 },
+  { word = "cve", weight = 3.0 },
+  { word = "release", weight = 2.0 },
+  { word = "rust", weight = 1.5 },
+  { word = "cargo", weight = 1.5 },
+  { word = "compiler", weight = 1.5 },
+  { word = "async", weight = 1.5 },
+]
+
+[[news_feeds]]
+id = "bbc-ukraine"
+name = "BBC News Україна"
+group = "economics-world"
+url = "https://feeds.bbci.co.uk/ukrainian/rss.xml"
+keywords = [
+  { word = "економік", weight = 2.5 },
+  { word = "курс", weight = 2.5 },
+  { word = "долар", weight = 2.5 },
+  { word = "євро", weight = 2.0 },
+  { word = "енергетик", weight = 2.5 },
+  { word = "санкц", weight = 2.0 },
+  { word = "інфляц", weight = 2.5 },
+  { word = "банк", weight = 1.5 },
+  { word = "кібер", weight = 3.0 },
+  { word = "технолог", weight = 1.5 },
+]

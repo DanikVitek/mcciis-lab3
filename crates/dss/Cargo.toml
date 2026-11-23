@@ -1,0 +1,12 @@
+[package]
+name = "dss"
+version.workspace = true
+edition.workspace = true
+description = "Production Rule-Based Decision Support System core (Forward Chaining + MYCIN CF)"
+
+[dependencies]
+hashbrown.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true

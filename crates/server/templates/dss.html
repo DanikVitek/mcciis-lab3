@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}ІСППР та База знань{% endblock %}
+
+{% block content %}
+<section>
+  <h2>
+    <span>1. Прийняті рішення та рекомендації ІСППР ({{ decisions.len() }})</span>
+    <span class="muted">Прямий вивід (Forward Chaining), ітерацій: {{ iterations }}, модель MYCIN CF</span>
+  </h2>
+  {% if decisions.is_empty() %}
+  <p class="muted">Жодне правило не спрацювало — оновіть дані Web-агента або додайте факт нижче.</p>
+  {% else %}
+  {% for dec in decisions %}
+  <div class="decision-card {{ dec.severity_class }}">
+    <div>
+      <span class="badge {{ dec.severity_class }}">{{ dec.severity_label }}</span>
+      <strong>{{ dec.rule_name }}</strong>
+      <span class="mono muted">({{ dec.rule_id }} • пріоритет {{ dec.priority }} • CF = {{ dec.cf }})</span>
+    </div>
+    <div style="margin-top:0.35rem">{{ dec.recommendation }}</div>
+    {% if !dec.derived_fact.is_empty() %}
+    <div class="muted" style="margin-top:0.3rem">Виведений факт: <code>{{ dec.derived_fact }}</code></div>
+    {% endif %}
+    <details>
+      <summary>Пояснення виводу ({{ dec.explanation.len() }} умов)</summary>
+      <ul style="margin:0.4rem 0 0 1.2rem;padding:0;font-size:0.86rem">
+        {% for tr in dec.explanation %}
+        <li><code>{{ tr.fact_key }}</code> ({{ tr.actual }}) <strong>{{ tr.op }}</strong> {{ tr.expected }} — джерело: <em>{{ tr.source }}</em> (CF={{ tr.cf }})</li>
+        {% endfor %}
+      </ul>
+    </details>
+  </div>
+  {% endfor %}
+  {% endif %}
+</section>
+
+<section>
+  <h2><span>2. Інтерактивне моделювання («Що якщо» — ручне додавання факту до БЗ)</span></h2>
+  <form method="post" action="/dss/fact" class="form-row">
+    <label>Ключ факту
+      <input type="text" name="key" placeholder="напр. nbu_rate_usd або cve_mentions_count" required style="min-width:240px">
+    </label>
+    <label>Значення (число / текст / true|false)
+      <input type="text" name="value" placeholder="напр. 43.5" required>
+    </label>
+    <label>CF (0.0 – 1.0)
+      <input type="number" name="cf" value="1.0" min="0" max="1" step="0.05" style="width:95px">
+    </label>
+    <button type="submit" class="btn">Додати факт і перерахувати</button>
+  </form>
+  {% if manual_facts_count > 0 %}
+  <form method="post" action="/dss/fact/clear" style="margin-top:0.75rem">
+    <button type="submit" class="btn btn-danger btn-sm">Очистити ручні факти ({{ manual_facts_count }})</button>
+  </form>
+  {% endif %}
+</section>
+
+<section>
+  <h2><span>3. Робоча пам'ять: факти Бази Знань ({{ facts.len() }})</span></h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Ключ факту</th><th>Значення</th><th>Походження</th><th>Джерело</th><th>CF</th><th>Оновлено</th></tr></thead>
+      <tbody>
+        {% for f in facts %}
+        <tr>
+          <td class="mono"><strong>{{ f.key }}</strong></td>
+          <td class="mono">{{ f.value }}</td>
+          <td><span class="badge {{ f.origin_class }}">{{ f.origin_label }}</span></td>
+          <td class="muted">{{ f.source }}</td>
+          <td class="mono">{{ f.cf }}</td>
+          <td class="mono muted">{{ f.updated_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span>4. Продукційні правила Бази Знань ({{ rules.len() }})</span></h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ID</th><th>Стан</th><th>Правило</th><th>Умови (ЯКЩО)</th><th>Висновок (ТО)</th><th>CF</th></tr></thead>
+      <tbody>
+        {% for r in rules %}
+        <tr>
+          <td class="mono">{{ r.id }}</td>
+          <td>
+            {% if r.active %}
+            <span class="badge badge-ok">Активне</span>
+            {% else %}
+            <span class="badge badge-group">Не спрацювало</span>
+            {% endif %}
+          </td>
+          <td><strong>{{ r.name }}</strong><br><span class="muted">{{ r.description }}</span></td>
+          <td class="mono">{{ r.conditions_text }}</td>
+          <td class="mono">{{ r.derived_text }}</td>
+          <td class="mono">{{ r.cf }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

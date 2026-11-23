@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{% endblock %} — Web-агент та ІСППР</title>
+  <style>
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --border: #dce2ec;
+  --text: #1b2432;
+  --muted: #5a667a;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --critical-bg: #fef2f2;
+  --critical-fg: #b91c1c;
+  --high-bg: #fff7ed;
+  --high-fg: #c2410c;
+  --medium-bg: #fefce8;
+  --medium-fg: #a16207;
+  --info-bg: #eff6ff;
+  --info-fg: #1d4ed8;
+  --ok-bg: #ecfdf5;
+  --ok-fg: #047857;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+header {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 1rem 1.5rem;
+  border-bottom: 3px solid var(--accent);
+}
+.header-inner {
+  max-width: 1280px;
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+.brand h1 { margin: 0; font-size: 1.25rem; }
+.brand p { margin: 0.15rem 0 0; font-size: 0.85rem; color: #94a3b8; }
+nav { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+nav a {
+  color: #e2e8f0;
+  text-decoration: none;
+  padding: 0.45rem 0.85rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+nav a:hover, nav a.active { background: var(--accent); color: #ffffff; }
+main {
+  max-width: 1280px;
+  margin: 1.5rem auto;
+  padding: 0 1.25rem 2.5rem;
+}
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 0.9rem;
+  margin-bottom: 1.25rem;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9rem 1.1rem;
+}
+.card .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.card .value { font-size: 1.55rem; font-weight: 700; margin-top: 0.25rem; }
+.card .sub { font-size: 0.8rem; color: var(--muted); margin-top: 0.15rem; }
+section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.15rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+section h2 {
+  margin: 0 0 0.85rem;
+  font-size: 1.1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+th, td {
+  text-align: left;
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+th { background: #f8fafc; color: var(--muted); font-weight: 600; font-size: 0.82rem; }
+tr:hover td { background: #fafcff; }
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  margin: 0.1rem 0.15rem 0.1rem 0;
+  white-space: nowrap;
+}
+.sev-critical { background: var(--critical-bg); color: var(--critical-fg); border: 1px solid #fecaca; }
+.sev-high { background: var(--high-bg); color: var(--high-fg); border: 1px solid #fed7aa; }
+.sev-medium { background: var(--medium-bg); color: var(--medium-fg); border: 1px solid #fde68a; }
+.sev-info { background: var(--info-bg); color: var(--info-fg); border: 1px solid #bfdbfe; }
+.badge-ok { background: var(--ok-bg); color: var(--ok-fg); border: 1px solid #a7f3d0; }
+.badge-kw { background: #eef2ff; color: #3730a3; }
+.badge-cve { background: #fef2f2; color: #991b1b; font-family: monospace; }
+.badge-group { background: #f1f5f9; color: #334155; }
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.42rem 0.8rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+.btn:hover { background: var(--accent-hover); }
+.btn-secondary { background: #e2e8f0; color: #1e293b; }
+.btn-secondary:hover { background: #cbd5e1; }
+.btn-danger { background: #dc2626; color: #ffffff; }
+.btn-danger:hover { background: #b91c1c; }
+.btn-sm { padding: 0.25rem 0.55rem; font-size: 0.78rem; }
+.alert-box {
+  background: var(--critical-bg);
+  border: 1px solid #fecaca;
+  color: var(--critical-fg);
+  border-radius: 10px;
+  padding: 0.9rem 1.1rem;
+  margin-bottom: 1.25rem;
+}
+.alert-box.warn {
+  background: var(--high-bg);
+  border-color: #fed7aa;
+  color: var(--high-fg);
+}
+.alert-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0;
+  border-top: 1px solid rgba(0,0,0,0.07);
+}
+.alert-item:first-child { border-top: none; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.84rem; }
+.muted { color: var(--muted); font-size: 0.84rem; }
+pre.code {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.83rem;
+}
+.decision-card {
+  border-left: 4px solid var(--accent);
+  background: #f8fafc;
+  padding: 0.85rem 1rem;
+  border-radius: 0 8px 8px 0;
+  margin-bottom: 0.75rem;
+}
+.decision-card.sev-critical { border-left-color: #dc2626; background: #fef2f2; color: var(--text); border-top: none; border-right: none; border-bottom: none; }
+.decision-card.sev-high { border-left-color: #ea580c; background: #fff7ed; color: var(--text); border-top: none; border-right: none; border-bottom: none; }
+.decision-card.sev-medium { border-left-color: #ca8a04; background: #fefce8; color: var(--text); border-top: none; border-right: none; border-bottom: none; }
+.decision-card.sev-info { border-left-color: #2563eb; background: #eff6ff; color: var(--text); border-top: none; border-right: none; border-bottom: none; }
+.form-row { display: flex; flex-wrap: wrap; gap: 0.65rem; align-items: flex-end; }
+.form-row label { display: flex; flex-direction: column; font-size: 0.82rem; color: var(--muted); gap: 0.25rem; }
+.form-row input {
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+details { margin-top: 0.6rem; }
+summary { cursor: pointer; font-weight: 600; color: var(--accent); font-size: 0.88rem; }
+.inline-form { display: inline; margin: 0; }
+.table-wrap { overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <h1>Інтелектуальний Web-агент та ІСППР</h1>
+        <p>Лабораторна робота № 3 • Моніторинг Web-джерел та автоматичне поповнення бази знань</p>
+      </div>
+      <nav>
+        <a href="/index.html"{% if active_nav == "index" %} class="active"{% endif %}>Моніторинг (index.html)</a>
+        <a href="/dss.html"{% if active_nav == "dss" %} class="active"{% endif %}>ІСППР та База знань</a>
+        <a href="/conf.html"{% if active_nav == "conf" %} class="active"{% endif %}>Конфігурація (conf.html)</a>
+        <a href="/api/state" target="_blank">JSON API</a>
+        <form class="inline-form" method="post" action="/poll">
+          <button type="submit" class="btn">Оновити зараз</button>
+        </form>
+      </nav>
+    </div>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
