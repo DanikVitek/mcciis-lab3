@@ -1,0 +1,40 @@
+{
+  "crates": {
+    "dss": {
+      "unit": 11,
+      "doc": 2,
+      "integration": 2,
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0,
+      "total": 15
+    },
+    "web-agent": {
+      "unit": 19,
+      "doc": 0,
+      "integration": 8,
+      "passed": 27,
+      "failed": 0,
+      "ignored": 0,
+      "total": 27
+    },
+    "web-agent-server": {
+      "unit": 0,
+      "doc": 0,
+      "integration": 4,
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "total": 4
+    }
+  },
+  "totals": {
+    "unit": 30,
+    "doc": 2,
+    "integration": 14,
+    "passed": 46,
+    "failed": 0,
+    "ignored": 0,
+    "total": 46
+  }
+}

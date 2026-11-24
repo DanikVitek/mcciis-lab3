@@ -142,11 +142,23 @@ command = "cargo"
 args = ["test", "--workspace"]
 
 [tasks.check]
-description = "Run all static checks (Rust clippy + SvelteKit sv check + Deno screenshot script)"
+description = "Run all static checks (Rust clippy + SvelteKit sv check + Deno report scripts)"
 category = "Verification"
 dependencies = ["clippy", "frontend-check"]
 command = "deno"
-args = ["check", "report/capture-screenshots.ts"]
+args = ["check", "report/capture-screenshots.ts", "report/collect-test-stats.ts"]
+
+[tasks.report-test-stats]
+description = "Run workspace tests and export structured counts to report/test-stats.json"
+category = "Report"
+command = "deno"
+args = [
+  "run",
+  "--allow-run",
+  "--allow-read",
+  "--allow-write",
+  "report/collect-test-stats.ts",
+]
 
 [tasks.report-screenshots]
 description = "Capture fresh full-page SPA screenshots via Firefox WebDriver BiDi"
@@ -165,7 +177,8 @@ args = [
 ]
 
 [tasks.report]
-description = "Compile Typst report (report/main.typ -> report/main.pdf)"
+description = "Refresh test counts and compile Typst report (report/main.typ -> report/main.pdf)"
 category = "Report"
+dependencies = ["report-test-stats"]
 command = "typst"
 args = ["compile", "report/main.typ", "report/main.pdf"]
