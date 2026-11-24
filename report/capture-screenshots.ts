@@ -1,10 +1,11 @@
 #!/usr/bin/env -S deno run --allow-run --allow-read --allow-write --allow-net --allow-env
 /**
  * Reproducible script to capture full-page screenshots of the live
- * Web-Agent (Rust Axum backend serving static SvelteKit SPA + JSON API) for Lab 3 report.
+ * Web-Agent (Rust Axum backend serving static SvelteKit SPA + JSON API + WebSocket) for Lab 3 report.
  *
  * Uses headless Firefox driven via WebDriver BiDi over WebSocket so that each SPA route
- * finishes client-side hydration and API fetching before taking the full-document screenshot.
+ * finishes client-side hydration, async API fetching, and WebSocket handshake before taking
+ * the full-document screenshot.
  */
 
 interface CurrencyRate {
@@ -302,6 +303,7 @@ async function main(): Promise<void> {
       },
       { name: 'dss.png', url: `${SERVER_URL}/dss`, readySelector: '.rule-card' },
       { name: 'conf.png', url: `${SERVER_URL}/conf`, readySelector: '.summary-grid' },
+      { name: 'guide.png', url: `${SERVER_URL}/guide`, readySelector: '.guide-hero' },
     ];
 
     console.log('--- Capturing Full-Page Screenshots ---');
@@ -313,6 +315,7 @@ async function main(): Promise<void> {
         wait: 'complete',
       });
       await waitForSelector(bidi, contextId, target.readySelector);
+      await waitForSelector(bidi, contextId, '.ws-connected', 6_000).catch(() => undefined);
 
       const shot = await bidi.send('browsingContext.captureScreenshot', {
         context: contextId,

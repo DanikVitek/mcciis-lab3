@@ -35,6 +35,7 @@ use tokio::sync::{
     Notify,
     RwLock,
     Semaphore,
+    broadcast,
 };
 use tokio::task::JoinSet;
 use tracing::{
@@ -71,6 +72,49 @@ use crate::nbu::{
 };
 
 const MAX_RECENT_LOGS: usize = 30;
+const UPDATE_CHANNEL_CAPACITY: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentUpdateKind {
+    Connected,
+    PollStarted,
+    PollCompleted,
+    StateChanged,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AgentUpdateEvent {
+    pub kind: AgentUpdateKind,
+    pub poll_count: u64,
+    pub poll_in_progress: bool,
+    pub changed_count: usize,
+    pub articles_count: usize,
+    pub decisions_count: usize,
+    pub last_poll_duration_ms: Option<u64>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+}
+
+impl AgentUpdateEvent {
+    pub fn from_snapshot(kind: AgentUpdateKind, snapshot: &AgentSnapshot) -> Self {
+        let changed_count = snapshot
+            .sites
+            .iter()
+            .filter(|s| s.is_visible_in_changed_table())
+            .count();
+        Self {
+            kind,
+            poll_count: snapshot.poll_count,
+            poll_in_progress: snapshot.poll_in_progress,
+            changed_count,
+            articles_count: snapshot.articles.len(),
+            decisions_count: snapshot.inference.decisions.len(),
+            last_poll_duration_ms: snapshot.last_poll_duration_ms,
+            timestamp: OffsetDateTime::now_utc(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentLogEntry {
@@ -119,7 +163,7 @@ pub struct AgentSnapshot {
     pub last_poll_at: Option<OffsetDateTime>,
     pub poll_count: u64,
     pub last_poll_duration_ms: Option<u64>,
-    #[serde(skip)]
+    #[serde(default)]
     pub poll_in_progress: bool,
     pub recent_logs: Vec<AgentLogEntry>,
 }
@@ -161,6 +205,7 @@ pub struct WebAgent {
     engine: Arc<InferenceEngine>,
     state: Arc<RwLock<AgentSnapshot>>,
     poll_trigger: Arc<Notify>,
+    updates_tx: broadcast::Sender<AgentUpdateEvent>,
 }
 
 impl WebAgent {
@@ -171,6 +216,7 @@ impl WebAgent {
             .build()?;
 
         let mut snapshot = load_persisted_snapshot(&config.dss.state_path).unwrap_or_default();
+        snapshot.poll_in_progress = false;
         reconcile_sites(&mut snapshot.sites, &config);
         reconcile_feeds(&mut snapshot.feeds, &config);
 
@@ -179,12 +225,15 @@ impl WebAgent {
             snapshot.inference = engine.evaluate(&base);
         }
 
+        let (updates_tx, _) = broadcast::channel(UPDATE_CHANNEL_CAPACITY);
+
         Ok(Self {
             config: Arc::new(config),
             client,
             engine: Arc::new(engine),
             state: Arc::new(RwLock::new(snapshot)),
             poll_trigger: Arc::new(Notify::new()),
+            updates_tx,
         })
     }
 
@@ -200,8 +249,18 @@ impl WebAgent {
         self.state.read().await.clone()
     }
 
+    pub fn subscribe(&self) -> broadcast::Receiver<AgentUpdateEvent> {
+        self.updates_tx.subscribe()
+    }
+
     pub fn request_immediate_poll(&self) {
         self.poll_trigger.notify_one();
+    }
+
+    fn emit_update(&self, kind: AgentUpdateKind, snapshot: &AgentSnapshot) {
+        let _ = self
+            .updates_tx
+            .send(AgentUpdateEvent::from_snapshot(kind, snapshot));
     }
 
     /// Фоновий неблокуючий цикл опитування (п. 6 методички).
@@ -228,7 +287,7 @@ impl WebAgent {
     pub async fn poll_once(&self) {
         let poll_start_utc = OffsetDateTime::now_utc();
 
-        let (eligible_sites, eligible_feeds, nbu_eligible, previous_currencies) = {
+        let (eligible_sites, eligible_feeds, nbu_eligible, previous_currencies, started_event) = {
             let mut guard = self.state.write().await;
             if guard.poll_in_progress {
                 return;
@@ -250,13 +309,19 @@ impl WebAgent {
             let nbu_eligible =
                 self.config.nbu_metrics.enabled && guard.nbu_health.should_poll(poll_start_utc);
 
+            let started_event =
+                AgentUpdateEvent::from_snapshot(AgentUpdateKind::PollStarted, &guard);
+
             (
                 eligible_sites,
                 eligible_feeds,
                 nbu_eligible,
                 guard.currencies.clone(),
+                started_event,
             )
         };
+
+        let _ = self.updates_tx.send(started_event);
 
         let started = Instant::now();
         info!("Web-агент: початок циклу збору інформації");
@@ -495,6 +560,8 @@ impl WebAgent {
             guard.clone()
         };
 
+        self.emit_update(AgentUpdateKind::PollCompleted, &snapshot_to_save);
+
         if let Err(err) = persist_snapshot(&self.config.dss.state_path, &snapshot_to_save) {
             warn!(error = %err, "Не вдалося зберегти стан агента на диск");
         }
@@ -516,6 +583,7 @@ impl WebAgent {
         };
 
         if let Some(snap) = snapshot_to_save {
+            self.emit_update(AgentUpdateKind::StateChanged, &snap);
             let _ = persist_snapshot(&self.config.dss.state_path, &snap);
         }
         updated
@@ -536,6 +604,7 @@ impl WebAgent {
         };
 
         if let Some(snap) = snapshot_to_save {
+            self.emit_update(AgentUpdateKind::StateChanged, &snap);
             let _ = persist_snapshot(&self.config.dss.state_path, &snap);
         }
         updated
@@ -560,6 +629,7 @@ impl WebAgent {
         };
 
         if let Some(snap) = snapshot_to_save {
+            self.emit_update(AgentUpdateKind::StateChanged, &snap);
             let _ = persist_snapshot(&self.config.dss.state_path, &snap);
         }
         updated
@@ -584,6 +654,7 @@ impl WebAgent {
         };
 
         if let Some(snap) = snapshot_to_save {
+            self.emit_update(AgentUpdateKind::StateChanged, &snap);
             let _ = persist_snapshot(&self.config.dss.state_path, &snap);
         }
         updated
@@ -599,6 +670,7 @@ impl WebAgent {
             guard.clone()
         };
 
+        self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
         let _ = persist_snapshot(&self.config.dss.state_path, &snapshot_to_save);
     }
 
@@ -623,6 +695,7 @@ impl WebAgent {
             guard.clone()
         };
 
+        self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
         let _ = persist_snapshot(&self.config.dss.state_path, &snapshot_to_save);
     }
 
@@ -637,6 +710,7 @@ impl WebAgent {
             guard.clone()
         };
 
+        self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
         let _ = persist_snapshot(&self.config.dss.state_path, &snapshot_to_save);
     }
 

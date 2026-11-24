@@ -170,8 +170,8 @@ async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
     let client = reqwest::Client::new();
     let base = format!("http://{addr}");
 
-    // 2. Статичний фронтенд SPA (корінь, асети та client-side fallback 200 OK для /dss, /conf, /article/*)
-    for route in ["/", "/dss", "/conf", "/article/demo"] {
+    // 2. Статичний фронтенд SPA (корінь, асети та client-side fallback 200 OK для /dss, /conf, /guide, /article/*)
+    for route in ["/", "/dss", "/conf", "/guide", "/article/demo"] {
         let resp = client.get(format!("{base}{route}")).send().await.unwrap();
         assert_eq!(
             resp.status(),

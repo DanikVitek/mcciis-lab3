@@ -1,4 +1,4 @@
-import { error } from '@sveltejs/kit';
+import { error, isHttpError } from '@sveltejs/kit';
 import {
   ManualFactFormSchema,
   NewsArticleSchema,
@@ -6,6 +6,16 @@ import {
   type NewsArticle,
   type UiStatePayload,
 } from '#lib/schemas.ts';
+
+export function formatApiError(err: unknown, fallback = 'Не вдалося виконати запит до API.'): string {
+  if (isHttpError(err)) {
+    return `${err.body.message} (HTTP ${err.status})`;
+  }
+  if (err instanceof Error && err.message.trim().length > 0) {
+    return err.message;
+  }
+  return fallback;
+}
 
 async function extractErrorMessage(response: Response, fallback: string): Promise<string> {
   const text = await response.text().catch(() => '');
@@ -36,32 +46,6 @@ async function fetchValidatedUiState(
   try {
     response = await fetcher(path, init);
   } catch {
-    throw new Error(
-      'Не вдалося підключитися до API-сервера Web-агента. Переконайтеся, що web-agent-server запущено.',
-    );
-  }
-
-  if (!response.ok) {
-    const detail = await extractErrorMessage(
-      response,
-      `API-сервер повернув помилку ${response.status}.`,
-    );
-    throw new Error(detail);
-  }
-
-  const raw: unknown = await response.json();
-  const parsed = UiStatePayloadSchema.safeParse(raw);
-  if (!parsed.success) {
-    throw new Error(`Некоректний формат відповіді від API-сервера: ${parsed.error.message}`);
-  }
-  return parsed.data;
-}
-
-export async function fetchUiState(fetcher: typeof fetch = fetch): Promise<UiStatePayload> {
-  let response: Response;
-  try {
-    response = await fetcher('/api/ui-state');
-  } catch {
     error(
       503,
       'Не вдалося підключитися до API-сервера Web-агента. Переконайтеся, що web-agent-server запущено.',
@@ -84,9 +68,13 @@ export async function fetchUiState(fetcher: typeof fetch = fetch): Promise<UiSta
   return parsed.data;
 }
 
+export function fetchUiState(fetcher: typeof fetch = fetch): Promise<UiStatePayload> {
+  return fetchValidatedUiState(fetcher, '/api/ui-state');
+}
+
 export async function fetchArticleById(
-  fetcher: typeof fetch,
   id: string,
+  fetcher: typeof fetch = fetch,
 ): Promise<NewsArticle | null> {
   const url = `/api/articles/${encodeURIComponent(id)}`;
   let response: Response;

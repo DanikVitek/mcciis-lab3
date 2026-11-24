@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { invalidateAll } from '$app/navigation';
-  import { clearManualFacts, upsertManualFact } from '#lib/api.ts';
+  import { clearManualFacts, formatApiError, upsertManualFact } from '#lib/api.ts';
   import CfMeter from '#lib/components/CfMeter.svelte';
+  import ErrorBanner from '#lib/components/ErrorBanner.svelte';
+  import LoadingSkeleton from '#lib/components/LoadingSkeleton.svelte';
+  import Tooltip from '#lib/components/Tooltip.svelte';
   import {
     describeOperationalMode,
     extractOperationalMode,
@@ -14,14 +16,18 @@
     severityLabelUk,
   } from '#lib/format.ts';
   import { getNotify } from '#lib/notify-context.ts';
-  import type { Decision, FactOrigin, Rule, Severity } from '#lib/schemas.ts';
-  import type { PageProps } from './$types';
+  import type {
+    AgentSnapshot,
+    Decision,
+    Fact,
+    FactOrigin,
+    Rule,
+    Severity,
+  } from '#lib/schemas.ts';
+  import { getUiState } from '#lib/ui-state.svelte.ts';
 
-  let { data }: PageProps = $props();
   const notify = getNotify();
-
-  let snapshot = $derived(data.uiState.snapshot);
-  let rules = $derived(data.uiState.rules);
+  const store = getUiState();
 
   let severityFilter = $state<'all' | Severity>('all');
   let originFilter = $state<'all' | FactOrigin>('all');
@@ -66,48 +72,36 @@
     },
   ] as const;
 
-  let modeInfo = $derived(describeOperationalMode(extractOperationalMode(snapshot)));
-  let allFacts = $derived(mergeAllFacts(snapshot));
-  let manualFactsList = $derived(
-    Object.values(snapshot.manual_facts).sort((a, b) => a.key.localeCompare(b.key)),
-  );
-  let firedSet = $derived(new Set(snapshot.inference.fired_rule_ids));
-
-  let suggestedKeys = $derived.by(() => {
+  function getSuggestedKeys(allFacts: Fact[], rules: Rule[]): string[] {
     const keys = new Set<string>();
     for (const f of allFacts) keys.add(f.key);
     for (const r of rules) {
       for (const c of r.conditions) keys.add(c.fact);
     }
     return Array.from(keys).sort();
-  });
+  }
 
-  let filteredDecisions = $derived(
-    snapshot.inference.decisions.filter(
-      (d) => severityFilter === 'all' || d.severity === severityFilter,
-    ),
-  );
-
-  let filteredFacts = $derived.by(() => {
+  function getFilteredFacts(allFacts: Fact[]): Fact[] {
     const q = factSearch.trim().toLowerCase();
     return allFacts.filter((f) => {
       if (originFilter !== 'all' && f.origin !== originFilter) return false;
       if (q) {
-        const hay = `${f.key} ${factDescriptionUk(f.key)} ${formatFactValue(f.value)} ${f.source}`.toLowerCase();
+        const hay =
+          `${f.key} ${factDescriptionUk(f.key)} ${formatFactValue(f.value)} ${f.source}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  });
+  }
 
-  let filteredRules = $derived(
-    rules.filter((r) => {
+  function getFilteredRules(rules: Rule[], firedSet: Set<string>): Rule[] {
+    return rules.filter((r) => {
       const fired = firedSet.has(r.id);
       if (ruleFilter === 'fired') return fired;
       if (ruleFilter === 'idle') return !fired;
       return true;
-    }),
-  );
+    });
+  }
 
   function applyPreset(preset: (typeof PRESETS)[number]) {
     factKey = preset.key;
@@ -123,12 +117,11 @@
     try {
       const key = factKey.trim();
       const value = factValue.trim();
-      await upsertManualFact({ key, value, cf: factCf });
-      await invalidateAll();
+      const updated = await upsertManualFact({ key, value, cf: factCf });
+      store.applyPayload(updated);
       notify('ok', `Факт «${key} = ${value}» застосовано, вивід ІСППР перераховано.`);
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Перевірте коректність введеного факту.';
+      const msg = formatApiError(err, 'Перевірте коректність введеного факту.');
       formError = msg;
       notify('error', msg);
     } finally {
@@ -140,12 +133,11 @@
     clearingFacts = true;
     formError = null;
     try {
-      await clearManualFacts();
-      await invalidateAll();
+      const updated = await clearManualFacts();
+      store.applyPayload(updated);
       notify('info', 'Усі ручні факти очищено, відновлено стан Web-агента.');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Не вдалося очистити ручні факти.';
-      notify('error', msg);
+      notify('error', formatApiError(err, 'Не вдалося очистити ручні факти.'));
     } finally {
       clearingFacts = false;
     }
@@ -258,302 +250,401 @@
   </article>
 {/snippet}
 
-<!-- 1. DSS Summary Banner -->
-<section class={['panel', 'dss-hero', `tone-${modeInfo.tone}`]}>
-  <div class="hero-row">
-    <div>
-      <div class="eyebrow">
-        <span class={['badge', `sev-${modeInfo.tone === 'ok' ? 'info' : modeInfo.tone}`]}>
-          Продукційна ІСППР (Forward Chaining)
-        </span>
-        <span class="mono muted">{modeInfo.code}</span>
+{#snippet dssContent(snapshot: AgentSnapshot, rules: Rule[])}
+  {@const modeInfo = describeOperationalMode(extractOperationalMode(snapshot))}
+  {@const allFacts = mergeAllFacts(snapshot)}
+  {@const manualFactsList = Object.values(snapshot.manual_facts).sort((a, b) =>
+    a.key.localeCompare(b.key),
+  )}
+  {@const firedSet = new Set(snapshot.inference.fired_rule_ids)}
+  {@const suggestedKeys = getSuggestedKeys(allFacts, rules)}
+  {@const filteredDecisions = snapshot.inference.decisions.filter(
+    (d) => severityFilter === 'all' || d.severity === severityFilter,
+  )}
+  {@const filteredFacts = getFilteredFacts(allFacts)}
+  {@const filteredRules = getFilteredRules(rules, firedSet)}
+
+  <!-- 1. DSS Summary Banner -->
+  <section class={['panel', 'dss-hero', `tone-${modeInfo.tone}`]}>
+    <div class="hero-row">
+      <div>
+        <div class="eyebrow">
+          <span class={['badge', `sev-${modeInfo.tone === 'ok' ? 'info' : modeInfo.tone}`]}>
+            Продукційна ІСППР (Forward Chaining)
+          </span>
+          <span class="mono muted">{modeInfo.code}</span>
+          <Tooltip
+            title="Прямий логічний вивід"
+            text="Машина виводу циклічно перевіряє правила ЯКЩО→ТО, додає виведені факти в робочу пам’ять і повторює прохід, доки не досягне нерухомої точки."
+            align="start"
+          />
+        </div>
+        <h1 class="hero-title">{modeInfo.title}</h1>
+        <p class="hero-summary">{modeInfo.summary}</p>
       </div>
-      <h1 class="hero-title">{modeInfo.title}</h1>
-      <p class="hero-summary">{modeInfo.summary}</p>
+
+      <div class="stat-grid">
+        <div class="stat-box">
+          <span class="k-row">
+            <span class="k">Активні рішення</span>
+            <Tooltip
+              text="Кількість рекомендацій, що сформовані на основі поточної робочої пам’яті."
+              align="end"
+            />
+          </span>
+          <span class="v num">{snapshot.inference.decisions.length}</span>
+        </div>
+        <div class="stat-box">
+          <span class="k-row">
+            <span class="k">Спрацювало правил</span>
+            <Tooltip
+              text="Частка правил із файлу knowledge/rules.toml, усі умови яких виконано."
+              align="end"
+            />
+          </span>
+          <span class="v num">{snapshot.inference.fired_rule_ids.length} / {rules.length}</span>
+        </div>
+        <div class="stat-box">
+          <span class="k-row">
+            <span class="k">Ітерацій виводу</span>
+            <Tooltip
+              title="Багатокрокове ланцюжкування"
+              text="Кількість проходів машини Forward Chaining: виведені факти з першого кроку запускають узагальнюючі правила на наступних кроках."
+              align="end"
+            />
+          </span>
+          <span class="v num">{snapshot.inference.iterations}</span>
+        </div>
+        <div class="stat-box">
+          <span class="k-row">
+            <span class="k">Фактів у пам’яті</span>
+            <Tooltip
+              text="Загальна кількість фактів: зібраних Web-агентом, введених вручну та виведених правилами."
+              align="end"
+            />
+          </span>
+          <span class="v num">{allFacts.length}</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. Decisions & Proof Traces -->
+  <section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title title-with-tip">
+          Сформовані рішення та ланцюжки доведення
+          <Tooltip
+            title="Модель впевненості MYCIN"
+            text="CF висновку = min(CF усіх умов) × CF правила. Якщо два правила виводять однаковий факт, застосовується комбінація CF₁ + CF₂×(1 − CF₁)."
+            align="start"
+          />
+        </h2>
+        <p class="panel-desc">
+          Кожне рішення супроводжується коефіцієнтом впевненості (CF) і повним поясненням умов, які
+          призвели до спрацювання правила.
+        </p>
+      </div>
+
+      <div class="filter-pills" role="group" aria-label="Фільтр за важливістю">
+        {#each ['all', 'critical', 'high', 'medium', 'info'] as const as sev (sev)}
+          <button
+            type="button"
+            class={['pill-btn', severityFilter === sev && 'active']}
+            onclick={() => (severityFilter = sev)}
+          >
+            {sev === 'all' ? 'Усі' : severityLabelUk(sev)}
+          </button>
+        {/each}
+      </div>
     </div>
 
-    <div class="stat-grid">
-      <div class="stat-box">
-        <span class="k">Активні рішення</span>
-        <span class="v num">{snapshot.inference.decisions.length}</span>
+    {#if filteredDecisions.length === 0}
+      <div class="empty-state">
+        За обраним рівнем важливості активних рішень немає. Спробуйте скористатися симулятором нижче.
       </div>
-      <div class="stat-box">
-        <span class="k">Спрацювало правил</span>
-        <span class="v num">{snapshot.inference.fired_rule_ids.length} / {rules.length}</span>
+    {:else}
+      <div class="decisions-list">
+        {#each filteredDecisions as dec, decIdx (dec.rule_id)}
+          {@render decisionCard(dec, decIdx < 3)}
+        {/each}
       </div>
-      <div class="stat-box">
-        <span class="k">Ітерацій виводу</span>
-        <span class="v num">{snapshot.inference.iterations}</span>
-      </div>
-      <div class="stat-box">
-        <span class="k">Фактів у пам’яті</span>
-        <span class="v num">{allFacts.length}</span>
-      </div>
-    </div>
-  </div>
-</section>
+    {/if}
+  </section>
 
-<!-- 2. Decisions & Proof Traces -->
-<section class="panel">
-  <div class="panel-header">
-    <div>
-      <h2 class="panel-title">Сформовані рішення та ланцюжки доведення</h2>
-      <p class="panel-desc">
-        Кожне рішення супроводжується коефіцієнтом впевненості (CF) і повним поясненням умов, які
-        призвели до спрацювання правила.
-      </p>
-    </div>
+  <!-- 3. Interactive What-If Simulator -->
+  <section class="panel simulator-panel">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title title-with-tip">
+          Симулятор «Що буде, якщо…» (ручні факти)
+          <Tooltip
+            title="Моделювання сценаріїв What-If"
+            text="Ручні факти мають пріоритет над автоматичними фактами Web-агента, але не змінюють зовнішні дані. Їх можна скинути в один клік."
+            align="start"
+          />
+        </h2>
+        <p class="panel-desc">
+          Перевизначте будь-який факт робочої пам’яті з власним коефіцієнтом впевненості (CF) —
+          машина виводу миттєво перерахує операційний режим і рекомендації.
+        </p>
+      </div>
 
-    <div class="filter-pills" role="group" aria-label="Фільтр за важливістю">
-      {#each ['all', 'critical', 'high', 'medium', 'info'] as const as sev (sev)}
+      {#if manualFactsList.length > 0}
         <button
           type="button"
-          class={['pill-btn', severityFilter === sev && 'active']}
-          onclick={() => (severityFilter = sev)}
+          class="btn btn-danger btn-sm"
+          disabled={clearingFacts}
+          onclick={handleClearFacts}
         >
-          {sev === 'all' ? 'Усі' : severityLabelUk(sev)}
+          {clearingFacts ? 'Очищення…' : `Скинути ручні факти (${manualFactsList.length})`}
+        </button>
+      {/if}
+    </div>
+
+    <div class="preset-bar">
+      <span class="preset-label muted">Швидкі сценарії:</span>
+      {#each PRESETS as preset (preset.label)}
+        <button
+          type="button"
+          class="preset-btn"
+          onclick={() => applyPreset(preset)}
+          title={preset.hint}
+        >
+          {preset.label}
         </button>
       {/each}
     </div>
-  </div>
 
-  {#if filteredDecisions.length === 0}
-    <div class="empty-state">
-      За обраним рівнем важливості активних рішень немає. Спробуйте скористатися симулятором нижче.
-    </div>
-  {:else}
-    <div class="decisions-list">
-      {#each filteredDecisions as dec, decIdx (dec.rule_id)}
-        {@render decisionCard(dec, decIdx < 3)}
-      {/each}
-    </div>
-  {/if}
-</section>
+    {#if formError}
+      <div class="form-error" role="alert">{formError}</div>
+    {/if}
 
-<!-- 3. Interactive What-If Simulator -->
-<section class="panel simulator-panel">
-  <div class="panel-header">
-    <div>
-      <h2 class="panel-title">Симулятор «Що буде, якщо…» (ручні факти)</h2>
-      <p class="panel-desc">
-        Перевизначте будь-який факт робочої пам’яті з власним коефіцієнтом впевненості (CF) — машина
-        виводу миттєво перерахує операційний режим і рекомендації.
-      </p>
-    </div>
+    <form class="sim-form" onsubmit={handleUpsertFact}>
+      <label class="field">
+        <span class="field-label">Ключ факту</span>
+        <input
+          type="text"
+          name="key"
+          list="dss-fact-keys"
+          required
+          placeholder="наприклад, cve_mentions_count"
+          bind:value={factKey}
+        />
+        <datalist id="dss-fact-keys">
+          {#each suggestedKeys as k (k)}
+            <option value={k}></option>
+          {/each}
+        </datalist>
+      </label>
+
+      <label class="field">
+        <span class="field-label">Значення (число, true/false або рядок)</span>
+        <input
+          type="text"
+          name="value"
+          required
+          placeholder="наприклад, 3 або high"
+          bind:value={factValue}
+        />
+      </label>
+
+      <label class="field cf-field">
+        <span class="field-label">
+          Коефіцієнт впевненості (CF): <strong class="mono num">{factCf.toFixed(2)}</strong>
+        </span>
+        <input type="range" name="cf" min="0" max="1" step="0.05" bind:value={factCf} />
+      </label>
+
+      <div class="field-actions">
+        <button type="submit" class="btn" disabled={submittingFact}>
+          {submittingFact ? 'Перерахунок…' : 'Застосувати факт і перерахувати'}
+        </button>
+      </div>
+    </form>
 
     {#if manualFactsList.length > 0}
-      <button
-        type="button"
-        class="btn btn-danger btn-sm"
-        disabled={clearingFacts}
-        onclick={handleClearFacts}
-      >
-        {clearingFacts ? 'Очищення…' : `Скинути ручні факти (${manualFactsList.length})`}
-      </button>
-    {/if}
-  </div>
-
-  <div class="preset-bar">
-    <span class="preset-label muted">Швидкі сценарії:</span>
-    {#each PRESETS as preset (preset.label)}
-      <button
-        type="button"
-        class="preset-btn"
-        onclick={() => applyPreset(preset)}
-        title={preset.hint}
-      >
-        {preset.label}
-      </button>
-    {/each}
-  </div>
-
-  {#if formError}
-    <div class="form-error" role="alert">{formError}</div>
-  {/if}
-
-  <form class="sim-form" onsubmit={handleUpsertFact}>
-    <label class="field">
-      <span class="field-label">Ключ факту</span>
-      <input
-        type="text"
-        name="key"
-        list="dss-fact-keys"
-        required
-        placeholder="наприклад, cve_mentions_count"
-        bind:value={factKey}
-      />
-      <datalist id="dss-fact-keys">
-        {#each suggestedKeys as k (k)}
-          <option value={k}></option>
+      <div class="manual-active">
+        <span class="muted">Активні ручні перевизначення:</span>
+        {#each manualFactsList as mf (mf.key)}
+          <span class="badge badge-kw mono">
+            {mf.key} = {formatFactValue(mf.value)} (CF {mf.cf.toFixed(2)})
+          </span>
         {/each}
-      </datalist>
-    </label>
+      </div>
+    {/if}
+  </section>
 
-    <label class="field">
-      <span class="field-label">Значення (число, true/false або рядок)</span>
+  <!-- 4. Working Memory Facts Explorer -->
+  <section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title title-with-tip">
+          Робоча пам’ять ІСППР (факти)
+          <Tooltip
+            title="Джерела фактів"
+            text="«Web-агент» — зібрано автоматично з HTTP/RSS/НБУ; «Ручне введення» — задано у симуляторі; «Виведено ІСППР» — похідні факти від спрацьованих правил."
+            align="start"
+          />
+        </h2>
+        <p class="panel-desc">
+          Об’єднаний набір вхідних фактів від Web-агента, ручних симуляцій і похідних фактів,
+          виведених правилами.
+        </p>
+      </div>
+      <span class="muted num">Показано {filteredFacts.length} із {allFacts.length}</span>
+    </div>
+
+    <div class="facts-controls">
       <input
-        type="text"
-        name="value"
-        required
-        placeholder="наприклад, 3 або high"
-        bind:value={factValue}
+        type="search"
+        class="search-input"
+        placeholder="Пошук факту за ключем, описом або значенням…"
+        bind:value={factSearch}
+        aria-label="Пошук фактів"
       />
-    </label>
 
-    <label class="field cf-field">
-      <span class="field-label">
-        Коефіцієнт впевненості (CF): <strong class="mono num">{factCf.toFixed(2)}</strong>
-      </span>
-      <input type="range" name="cf" min="0" max="1" step="0.05" bind:value={factCf} />
-    </label>
-
-    <div class="field-actions">
-      <button type="submit" class="btn" disabled={submittingFact}>
-        {submittingFact ? 'Перерахунок…' : 'Застосувати факт і перерахувати'}
-      </button>
+      <div class="filter-pills" role="group" aria-label="Фільтр за походженням факту">
+        {#each ['all', 'web_agent', 'inferred', 'manual'] as const as orig (orig)}
+          <button
+            type="button"
+            class={['pill-btn', originFilter === orig && 'active']}
+            onclick={() => (originFilter = orig)}
+          >
+            {orig === 'all' ? 'Усі джерела' : originLabelUk(orig)}
+          </button>
+        {/each}
+      </div>
     </div>
-  </form>
 
-  {#if manualFactsList.length > 0}
-    <div class="manual-active">
-      <span class="muted">Активні ручні перевизначення:</span>
-      {#each manualFactsList as mf (mf.key)}
-        <span class="badge badge-kw mono">
-          {mf.key} = {formatFactValue(mf.value)} (CF {mf.cf.toFixed(2)})
-        </span>
-      {/each}
-    </div>
-  {/if}
-</section>
+    {#if filteredFacts.length === 0}
+      <div class="empty-state">Фактів за обраними критеріями не знайдено.</div>
+    {:else}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Факт і пояснення</th>
+              <th>Значення</th>
+              <th>Походження</th>
+              <th>Впевненість (CF)</th>
+              <th>Оновлено</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each filteredFacts as fact (fact.key)}
+              <tr>
+                <td>
+                  <div class="mono"><strong>{fact.key}</strong></div>
+                  <div class="muted">{factDescriptionUk(fact.key)}</div>
+                </td>
+                <td class="mono num">{formatFactValue(fact.value)}</td>
+                <td>
+                  <span
+                    class={[
+                      'badge',
+                      fact.origin === 'manual'
+                        ? 'sev-high'
+                        : fact.origin === 'inferred'
+                          ? 'badge-kw'
+                          : 'badge-group',
+                    ]}
+                  >
+                    {originLabelUk(fact.origin)}
+                  </span>
+                  <div class="muted">{fact.source}</div>
+                </td>
+                <td>
+                  <CfMeter value={fact.cf} label={fact.cf.toFixed(2)} width="62px" />
+                </td>
+                <td class="muted">{formatDateTimeUk(fact.updated_at)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </section>
 
-<!-- 4. Working Memory Facts Explorer -->
-<section class="panel">
-  <div class="panel-header">
-    <div>
-      <h2 class="panel-title">Робоча пам’ять ІСППР (факти)</h2>
-      <p class="panel-desc">
-        Об’єднаний набір вхідних фактів від Web-агента, ручних симуляцій і похідних фактів,
-        виведених правилами.
-      </p>
-    </div>
-    <span class="muted num">Показано {filteredFacts.length} із {allFacts.length}</span>
-  </div>
+  <!-- 5. Production Rules Catalog -->
+  <section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2 class="panel-title title-with-tip">
+          База продукційних правил ({rules.length})
+          <Tooltip
+            title="Декларативна база знань"
+            text="Усі правила завантажуються з knowledge/rules.toml. Зелена рамка означає, що правило активне на поточних фактах."
+            align="start"
+          />
+        </h2>
+        <p class="panel-desc">
+          Повний перелік правил формату ЯКЩО (умови) → ТО (похідний факт і рекомендація) з бази знань
+          TOML.
+        </p>
+      </div>
 
-  <div class="facts-controls">
-    <input
-      type="search"
-      class="search-input"
-      placeholder="Пошук факту за ключем, описом або значенням…"
-      bind:value={factSearch}
-      aria-label="Пошук фактів"
-    />
-
-    <div class="filter-pills" role="group" aria-label="Фільтр за походженням факту">
-      {#each ['all', 'web_agent', 'inferred', 'manual'] as const as orig (orig)}
+      <div class="filter-pills" role="group" aria-label="Фільтр правил">
         <button
           type="button"
-          class={['pill-btn', originFilter === orig && 'active']}
-          onclick={() => (originFilter = orig)}
+          class={['pill-btn', ruleFilter === 'all' && 'active']}
+          onclick={() => (ruleFilter = 'all')}
         >
-          {orig === 'all' ? 'Усі джерела' : originLabelUk(orig)}
+          Усі ({rules.length})
         </button>
+        <button
+          type="button"
+          class={['pill-btn', ruleFilter === 'fired' && 'active']}
+          onclick={() => (ruleFilter = 'fired')}
+        >
+          Спрацювали ({snapshot.inference.fired_rule_ids.length})
+        </button>
+        <button
+          type="button"
+          class={['pill-btn', ruleFilter === 'idle' && 'active']}
+          onclick={() => (ruleFilter = 'idle')}
+        >
+          Неактивні ({Math.max(0, rules.length - snapshot.inference.fired_rule_ids.length)})
+        </button>
+      </div>
+    </div>
+
+    <div class="rules-grid">
+      {#each filteredRules as rule (rule.id)}
+        {@render ruleCard(rule, firedSet.has(rule.id))}
       {/each}
     </div>
-  </div>
+  </section>
+{/snippet}
 
-  {#if filteredFacts.length === 0}
-    <div class="empty-state">Фактів за обраними критеріями не знайдено.</div>
-  {:else}
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Факт і пояснення</th>
-            <th>Значення</th>
-            <th>Походження</th>
-            <th>Впевненість (CF)</th>
-            <th>Оновлено</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each filteredFacts as fact (fact.key)}
-            <tr>
-              <td>
-                <div class="mono"><strong>{fact.key}</strong></div>
-                <div class="muted">{factDescriptionUk(fact.key)}</div>
-              </td>
-              <td class="mono num">{formatFactValue(fact.value)}</td>
-              <td>
-                <span
-                  class={[
-                    'badge',
-                    fact.origin === 'manual'
-                      ? 'sev-high'
-                      : fact.origin === 'inferred'
-                        ? 'badge-kw'
-                        : 'badge-group',
-                  ]}
-                >
-                  {originLabelUk(fact.origin)}
-                </span>
-                <div class="muted">{fact.source}</div>
-              </td>
-              <td>
-                <CfMeter value={fact.cf} label={fact.cf.toFixed(2)} width="62px" />
-              </td>
-              <td class="muted">{formatDateTimeUk(fact.updated_at)}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {/if}
-</section>
+<svelte:boundary>
+  {@const uiState = await store.load()}
+  {@render dssContent(uiState.snapshot, uiState.rules)}
 
-<!-- 5. Production Rules Catalog -->
-<section class="panel">
-  <div class="panel-header">
-    <div>
-      <h2 class="panel-title">База продукційних правил ({rules.length})</h2>
-      <p class="panel-desc">
-        Повний перелік правил формату ЯКЩО (умови) → ТО (похідний факт і рекомендація) з бази знань
-        TOML.
-      </p>
-    </div>
+  {#snippet pending()}
+    <LoadingSkeleton variant="dss" message="Завантаження рішень і бази знань ІСППР…" />
+  {/snippet}
 
-    <div class="filter-pills" role="group" aria-label="Фільтр правил">
-      <button
-        type="button"
-        class={['pill-btn', ruleFilter === 'all' && 'active']}
-        onclick={() => (ruleFilter = 'all')}
-      >
-        Усі ({rules.length})
-      </button>
-      <button
-        type="button"
-        class={['pill-btn', ruleFilter === 'fired' && 'active']}
-        onclick={() => (ruleFilter = 'fired')}
-      >
-        Спрацювали ({snapshot.inference.fired_rule_ids.length})
-      </button>
-      <button
-        type="button"
-        class={['pill-btn', ruleFilter === 'idle' && 'active']}
-        onclick={() => (ruleFilter = 'idle')}
-      >
-        Неактивні ({Math.max(0, rules.length - snapshot.inference.fired_rule_ids.length)})
-      </button>
-    </div>
-  </div>
-
-  <div class="rules-grid">
-    {#each filteredRules as rule (rule.id)}
-      {@render ruleCard(rule, firedSet.has(rule.id))}
-    {/each}
-  </div>
-</section>
+  {#snippet failed(err, reset)}
+    <ErrorBanner
+      error={err}
+      title="Не вдалося завантажити дані ІСППР"
+      onRetry={() => {
+        store.retry();
+        reset();
+      }}
+    />
+  {/snippet}
+</svelte:boundary>
 
 <style>
+  .title-with-tip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.42rem;
+  }
+
   .dss-hero {
     border-left: 5px solid var(--accent);
   }
@@ -583,6 +674,7 @@
 
   .eyebrow {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
     margin-bottom: 0.4rem;
@@ -614,6 +706,13 @@
     display: flex;
     flex-direction: column;
     gap: 0.15rem;
+  }
+
+  .k-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem;
   }
 
   .stat-box .k {

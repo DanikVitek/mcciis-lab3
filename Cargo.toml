@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 feed-rs = "3.0.0"
 hashbrown = { version = "0.17.2", features = ["serde"] }
 hex = "0.4.3"

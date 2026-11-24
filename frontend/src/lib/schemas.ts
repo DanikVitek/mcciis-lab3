@@ -192,9 +192,30 @@ export const AgentSnapshotSchema = z.object({
   last_poll_at: z.nullable(z.string()),
   poll_count: z.number(),
   last_poll_duration_ms: z.nullable(z.number()),
+  poll_in_progress: z.boolean(),
   recent_logs: z.array(AgentLogEntrySchema),
 });
 export type AgentSnapshot = z.infer<typeof AgentSnapshotSchema>;
+
+export const AgentUpdateKindSchema = z.enum([
+  'connected',
+  'poll_started',
+  'poll_completed',
+  'state_changed',
+]);
+export type AgentUpdateKind = z.infer<typeof AgentUpdateKindSchema>;
+
+export const AgentUpdateEventSchema = z.object({
+  kind: AgentUpdateKindSchema,
+  poll_count: z.number(),
+  poll_in_progress: z.boolean(),
+  changed_count: z.number(),
+  articles_count: z.number(),
+  decisions_count: z.number(),
+  last_poll_duration_ms: z.nullable(z.number()),
+  timestamp: z.string(),
+});
+export type AgentUpdateEvent = z.infer<typeof AgentUpdateEventSchema>;
 
 export const RetryPolicySchema = z.object({
   parse_max_retries: z.number(),

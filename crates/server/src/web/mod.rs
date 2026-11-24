@@ -1,7 +1,13 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::error_handling::HandleErrorLayer;
+use axum::extract::ws::{
+    Message,
+    WebSocket,
+    WebSocketUpgrade,
+};
 use axum::extract::{
     Path,
     State,
@@ -29,6 +35,7 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use tokio::sync::broadcast::error::RecvError;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::timeout::TimeoutLayer;
 use tower::{
@@ -44,6 +51,8 @@ use tower_http::trace::TraceLayer;
 use web_agent::config::AppConfig;
 use web_agent::{
     AgentSnapshot,
+    AgentUpdateEvent,
+    AgentUpdateKind,
     WebAgent,
 };
 
@@ -136,7 +145,7 @@ pub fn build_router_with_frontend_mode(agent: WebAgent, mode: FrontendMode) -> R
         .route("/api/dss/fact/clear", post(api_clear_facts_handler))
         .route("/api/{*path}", any(api_not_found_handler));
 
-    let router = match mode {
+    let http_router = match mode {
         FrontendMode::StaticDir(frontend_dir) => {
             let spa_index = frontend_dir.join("index.html");
             let static_service = ServeDir::new(frontend_dir).fallback(ServeFile::new(spa_index));
@@ -150,9 +159,83 @@ pub fn build_router_with_frontend_mode(agent: WebAgent, mode: FrontendMode) -> R
                 Redirect::temporary(&format!("{dev_base}{path_and_query}"))
             }
         }),
-    };
+    }
+    .layer(middleware);
 
-    router.layer(middleware).with_state(agent)
+    // WebSocket-маршрут винесено окремо від CompressionLayer та TimeoutLayer,
+    // щоб забезпечити коректний HTTP 101 Upgrade та довготривалу push-сесію.
+    let ws_router = Router::new()
+        .route("/api/ws", get(api_ws_handler))
+        .layer(TraceLayer::new_for_http());
+
+    ws_router.merge(http_router).with_state(agent)
+}
+
+async fn api_ws_handler(ws: WebSocketUpgrade, State(agent): State<WebAgent>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, agent))
+}
+
+async fn handle_ws_connection(mut socket: WebSocket, agent: WebAgent) {
+    let mut rx = agent.subscribe();
+    let initial_snap = agent.snapshot().await;
+    let connected_event =
+        AgentUpdateEvent::from_snapshot(AgentUpdateKind::Connected, &initial_snap);
+
+    if send_ws_event(&mut socket, &connected_event).await.is_err() {
+        return;
+    }
+
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+
+    loop {
+        tokio::select! {
+            recv_res = rx.recv() => {
+                match recv_res {
+                    Ok(event) => {
+                        if send_ws_event(&mut socket, &event).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => {
+                        let snap = agent.snapshot().await;
+                        let catchup = AgentUpdateEvent::from_snapshot(AgentUpdateKind::StateChanged, &snap);
+                        if send_ws_event(&mut socket, &catchup).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            client_msg = socket.recv() => {
+                match client_msg {
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+            _ = heartbeat.tick() => {
+                if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn send_ws_event(socket: &mut WebSocket, event: &AgentUpdateEvent) -> Result<(), ()> {
+    let Ok(payload) = serde_json::to_string(event) else {
+        return Ok(());
+    };
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|_| ())
 }
 
 async fn api_not_found_handler() -> impl IntoResponse {
