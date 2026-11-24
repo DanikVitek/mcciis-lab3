@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+#![allow(clippy::unwrap_used)]
+
+use std::path::Path;
 use std::time::Duration;
 
 use axum::Router;
@@ -7,6 +9,7 @@ use dss::{
     InferenceEngine,
     KnowledgeBase,
 };
+use tempfile::TempDir;
 use tokio::io::{
     AsyncReadExt,
     AsyncWriteExt,
@@ -27,7 +30,6 @@ use web_agent::config::{
     NewsFeedConfig,
     ServerConfig,
 };
-use web_agent::health::RetryPolicy;
 use web_agent_server::web::build_router_with_frontend_dir;
 
 async fn spawn_mock_sources() -> String {
@@ -119,16 +121,17 @@ impl MinimalWsClient {
             let opcode = self.buf[0] & 0x0f;
             let masked = (self.buf[1] & 0x80) != 0;
             assert!(!masked, "Server WebSocket frames must not be masked");
-            let mut payload_len = (self.buf[1] & 0x7f) as usize;
+            let mut payload_len = usize::from(self.buf[1] & 0x7f);
             let mut offset = 2;
 
             if payload_len == 126 {
                 self.ensure_bytes(4).await;
-                payload_len = u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize;
+                payload_len = usize::from(u16::from_be_bytes([self.buf[2], self.buf[3]]));
                 offset = 4;
             } else if payload_len == 127 {
                 self.ensure_bytes(10).await;
-                payload_len = u64::from_be_bytes(self.buf[2..10].try_into().unwrap()) as usize;
+                let len_u64 = u64::from_be_bytes(self.buf[2..10].try_into().unwrap());
+                payload_len = usize::try_from(len_u64).unwrap();
                 offset = 10;
             }
 
@@ -146,57 +149,61 @@ impl MinimalWsClient {
 #[tokio::test]
 async fn websocket_pushes_connected_and_poll_lifecycle_events() {
     let mock_base = spawn_mock_sources().await;
-    let temp_state = PathBuf::from(format!(
-        "/tmp/web_agent_server_ws_test_{}.json",
-        std::process::id()
-    ));
-    let temp_frontend_dir = PathBuf::from(format!(
-        "/tmp/web_agent_server_ws_frontend_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&temp_state);
-    let _ = std::fs::remove_dir_all(&temp_frontend_dir);
+    let temp_dir = TempDir::new().unwrap();
+    let temp_frontend_dir = temp_dir.path().join("frontend");
+    let rules_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../knowledge/rules.toml");
+
     std::fs::create_dir_all(&temp_frontend_dir).unwrap();
     std::fs::write(temp_frontend_dir.join("index.html"), "<html>SPA</html>").unwrap();
 
-    let config = AppConfig::new(
-        ServerConfig::new("127.0.0.1:0".into(), 300, 5, 4, RetryPolicy::default()).unwrap(),
-        LoggingConfig::new(
-            PathBuf::from("/tmp/web_agent_ws_logs"),
-            "ws-test.log".to_string(),
-            LogRotation::Daily,
-            3,
+    let config = AppConfig::builder()
+        .server(
+            ServerConfig::builder()
+                .bind_addr("127.0.0.1:0")
+                .poll_interval_secs(300)
+                .request_timeout_secs(5)
+                .max_concurrent_requests(4)
+                .build()
+                .unwrap(),
         )
-        .unwrap(),
-        DssConfig {
-            rules_path: PathBuf::from("../../knowledge/rules.toml"),
-            state_path: temp_state.clone(),
-        },
-        NbuMetricsConfig {
+        .logging(
+            LoggingConfig::builder()
+                .dir(temp_dir.path().join("logs"))
+                .file_prefix("ws-test.log")
+                .rotation(LogRotation::Never)
+                .max_files(3)
+                .build()
+                .unwrap(),
+        )
+        .dss(DssConfig {
+            rules_path,
+            state_path: temp_dir.path().join("state.json"),
+        })
+        .nbu_metrics(NbuMetricsConfig {
             enabled: true,
             url: format!("{mock_base}/nbu"),
             currencies: vec!["USD".into()],
-        },
-        vec![HttpSiteConfig {
+        })
+        .http_sites(vec![HttpSiteConfig {
             id: "ws-site".into(),
             name: "WS Portal".into(),
             url: format!("{mock_base}/page"),
             category: "mock".into(),
-        }],
-        vec![NewsFeedConfig {
+        }])
+        .news_feeds(vec![NewsFeedConfig {
             id: "ws-feed".into(),
             name: "WS Security Feed".into(),
             group: "cybersecurity".into(),
             url: format!("{mock_base}/rss"),
-            keywords: vec![KeywordCriterion::new("cve".into(), 2.5).unwrap()],
-        }],
-    )
-    .unwrap();
+            keywords: vec![KeywordCriterion::new("cve", 2.5).unwrap()],
+        }])
+        .build()
+        .unwrap();
 
     let kb = KnowledgeBase::load_from_file(&config.dss.rules_path).unwrap();
     let agent = WebAgent::new(config, InferenceEngine::new(kb)).unwrap();
 
-    let router = build_router_with_frontend_dir(agent.clone(), temp_frontend_dir.clone());
+    let router = build_router_with_frontend_dir(agent.clone(), temp_frontend_dir);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_handle = tokio::spawn(async move {
@@ -237,6 +244,4 @@ async fn websocket_pushes_connected_and_poll_lifecycle_events() {
 
     server_handle.abort();
     let _ = server_handle.await;
-    let _ = std::fs::remove_file(&temp_state);
-    let _ = std::fs::remove_dir_all(&temp_frontend_dir);
 }

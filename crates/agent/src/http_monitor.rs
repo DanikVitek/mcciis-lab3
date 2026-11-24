@@ -1,5 +1,8 @@
+//! Моніторинг HTTP/HTTPS-сайтів із потоковим обчисленням SHA-256 та обмеженням розміру тіла.
+
 use reqwest::{
     Client,
+    StatusCode,
     header,
 };
 use serde::{
@@ -10,6 +13,7 @@ use sha2::{
     Digest,
     Sha256,
 };
+use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::config::HttpSiteConfig;
@@ -20,6 +24,10 @@ use crate::health::{
     SourceHealth,
 };
 
+/// Максимальний розмір тіла HTTP-відповіді, що зчитується під час перевірки сайту (10 МБ).
+pub const MAX_HTTP_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Збережений стан окремого контрольованого HTTP/HTTPS-сайту.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpSiteState {
     pub id: String,
@@ -43,6 +51,8 @@ pub struct HttpSiteState {
 }
 
 impl HttpSiteState {
+    /// Ініціалізує початковий стан сайту з конфігурації.
+    #[must_use]
     pub fn from_config(cfg: &HttpSiteConfig) -> Self {
         Self {
             id: cfg.id.clone(),
@@ -64,21 +74,31 @@ impl HttpSiteState {
         }
     }
 
+    /// Повертає різницю розміру тіла (у байтах) відносно попередньої зафіксованої версії.
+    #[must_use]
     pub fn size_delta(&self) -> Option<i64> {
         match (self.body_size, self.previous_size) {
             (Some(curr), Some(prev)) => {
                 let diff = i128::from(curr) - i128::from(prev);
-                Some(diff.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
+                let clamped = diff.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+                Some(i64::try_from(clamped).unwrap_or(if clamped < 0 {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                }))
             }
             _ => None,
         }
     }
 
-    pub fn is_visible_in_changed_table(&self) -> bool {
+    /// Визначає, чи має сайт відображатися у таблиці непереглянутих змін.
+    #[must_use]
+    pub const fn is_visible_in_changed_table(&self) -> bool {
         !self.health.disabled && self.changed && !self.acknowledged
     }
 }
 
+/// Результат одного HTTP-зондажу сайту.
 #[derive(Debug, Clone)]
 pub struct SiteProbe {
     pub status_code: u16,
@@ -89,61 +109,91 @@ pub struct SiteProbe {
     pub last_modified: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// Помилка HTTP-зондажу сайту з класифікацією для політики повторів.
+#[derive(Debug, Clone, Error)]
+#[error("{message}")]
 pub struct SiteProbeError {
     pub message: String,
     pub kind: ErrorKind,
 }
 
+/// Виконує один HTTP GET-запит та потоково обчислює SHA-256 тіла з контролем ліміту байтів.
+///
+/// # Errors
+///
+/// Повертає [`SiteProbeError`] при мережевій помилці, статусі 5xx/429,
+/// помилці декодування або перевищенні [`MAX_HTTP_BODY_BYTES`].
+#[tracing::instrument(skip(client))]
 pub async fn probe_site(client: &Client, url: &str) -> Result<SiteProbe, SiteProbeError> {
-    let head_meta = match client.head(url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let content_length = resp.content_length();
-            let etag = header_to_string(resp.headers().get(header::ETAG));
-            let last_modified = header_to_string(resp.headers().get(header::LAST_MODIFIED));
-            Some((content_length, etag, last_modified))
-        }
-        _ => None,
-    };
-
-    let resp = client.get(url).send().await.map_err(|e| SiteProbeError {
+    let mut resp = client.get(url).send().await.map_err(|e| SiteProbeError {
         kind: if e.is_builder() || e.is_decode() {
             ErrorKind::Parse
         } else {
             ErrorKind::Transient
         },
-        message: format!("Помилка запиту: {e}"),
+        message: format!("помилка запиту: {e}"),
     })?;
 
-    let status_code = resp.status().as_u16();
-    let get_content_length = resp.content_length();
-    let get_etag = header_to_string(resp.headers().get(header::ETAG));
-    let get_last_modified = header_to_string(resp.headers().get(header::LAST_MODIFIED));
+    let status = resp.status();
+    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+        return Err(SiteProbeError {
+            kind: ErrorKind::Transient,
+            message: format!("тимчасова помилка сервера: HTTP {status}"),
+        });
+    }
 
-    let bytes = resp.bytes().await.map_err(|e| SiteProbeError {
+    let status_code = status.as_u16();
+    let content_length = resp.content_length();
+    if let Some(declared) = content_length
+        && declared > MAX_HTTP_BODY_BYTES as u64
+    {
+        return Err(SiteProbeError {
+            kind: ErrorKind::Parse,
+            message: format!(
+                "розмір тіла відповіді ({declared} байт) перевищує ліміт {MAX_HTTP_BODY_BYTES} байт"
+            ),
+        });
+    }
+
+    let etag = header_to_string(resp.headers().get(header::ETAG));
+    let last_modified = header_to_string(resp.headers().get(header::LAST_MODIFIED));
+
+    let mut hasher = Sha256::new();
+    let mut body_size: u64 = 0;
+
+    while let Some(chunk) = resp.chunk().await.map_err(|e| SiteProbeError {
         kind: if e.is_decode() {
             ErrorKind::Parse
         } else {
             ErrorKind::Transient
         },
-        message: format!("Помилка читання/декодування тіла відповіді: {e}"),
-    })?;
+        message: format!("помилка читання/декодування тіла відповіді: {e}"),
+    })? {
+        body_size = body_size.saturating_add(chunk.len() as u64);
+        if body_size > MAX_HTTP_BODY_BYTES as u64 {
+            return Err(SiteProbeError {
+                kind: ErrorKind::Parse,
+                message: format!(
+                    "розмір тіла відповіді перевищив ліміт {MAX_HTTP_BODY_BYTES} байт"
+                ),
+            });
+        }
+        hasher.update(&chunk);
+    }
 
-    let body_size = bytes.len() as u64;
-    let content_hash = hex::encode(Sha256::digest(&bytes));
-
-    let (head_len, head_etag, head_lm) = head_meta.unwrap_or((None, None, None));
+    let content_hash = hex::encode(hasher.finalize());
 
     Ok(SiteProbe {
         status_code,
-        content_length: get_content_length.or(head_len),
+        content_length,
         body_size,
         content_hash,
-        etag: get_etag.or(head_etag),
-        last_modified: get_last_modified.or(head_lm),
+        etag,
+        last_modified,
     })
 }
 
+/// Застосовує результат зондажу до стану сайту й повертає перехід помилки (якщо він стався).
 pub fn apply_probe(
     state: &mut HttpSiteState,
     result: Result<SiteProbe, SiteProbeError>,
@@ -193,7 +243,7 @@ pub fn apply_probe(
 }
 
 fn header_to_string(val: Option<&header::HeaderValue>) -> Option<String> {
-    val.and_then(|v| v.to_str().ok()).map(|s| s.to_string())
+    val.and_then(|v| v.to_str().ok()).map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -255,8 +305,9 @@ mod tests {
             if expected_changed {
                 prop_assert_eq!(state.change_count, 2);
                 prop_assert!(state.is_visible_in_changed_table());
-                let expected_delta = (i128::from(s2) - i128::from(s1))
-                    .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+                let clamped = (i128::from(s2) - i128::from(s1))
+                    .clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+                let expected_delta = i64::try_from(clamped).unwrap();
                 prop_assert_eq!(state.size_delta(), Some(expected_delta));
             } else {
                 prop_assert_eq!(state.change_count, 1);

@@ -1,5 +1,10 @@
+#![allow(clippy::unwrap_used)]
+
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 use axum::Router;
 use axum::routing::get;
@@ -7,6 +12,7 @@ use dss::{
     InferenceEngine,
     KnowledgeBase,
 };
+use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tracing::Dispatch;
 use tracing::instrument::WithSubscriber;
@@ -27,7 +33,6 @@ use web_agent::config::{
     NewsFeedConfig,
     ServerConfig,
 };
-use web_agent::health::RetryPolicy;
 use web_agent_server::logging::build_rotating_appender;
 use web_agent_server::web::build_router_with_frontend_dir;
 #[cfg(debug_assertions)]
@@ -70,22 +75,11 @@ async fn spawn_mock_sources() -> String {
 #[tokio::test]
 async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
     let mock_base = spawn_mock_sources().await;
-
-    let temp_state = PathBuf::from(format!(
-        "/tmp/web_agent_server_api_test_{}.json",
-        std::process::id()
-    ));
-    let temp_log_dir = PathBuf::from(format!(
-        "/tmp/web_agent_server_e2e_logs_{}",
-        std::process::id()
-    ));
-    let temp_frontend_dir = PathBuf::from(format!(
-        "/tmp/web_agent_server_e2e_frontend_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&temp_state);
-    let _ = std::fs::remove_dir_all(&temp_log_dir);
-    let _ = std::fs::remove_dir_all(&temp_frontend_dir);
+    let temp_dir = TempDir::new().unwrap();
+    let temp_state = temp_dir.path().join("state.json");
+    let temp_log_dir = temp_dir.path().join("logs");
+    let temp_frontend_dir = temp_dir.path().join("frontend");
+    let rules_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../knowledge/rules.toml");
 
     std::fs::create_dir_all(temp_frontend_dir.join("_app")).unwrap();
     std::fs::write(
@@ -99,44 +93,52 @@ async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
     )
     .unwrap();
 
-    let log_cfg = LoggingConfig::new(
-        temp_log_dir.clone(),
-        "web-agent-server.log".to_string(),
-        LogRotation::Daily,
-        7,
-    )
-    .unwrap();
+    let log_cfg = LoggingConfig::builder()
+        .dir(temp_log_dir.clone())
+        .file_prefix("web-agent-server.log")
+        .rotation(LogRotation::Never)
+        .max_files(7)
+        .build()
+        .unwrap();
 
-    let config = AppConfig::new(
-        ServerConfig::new("127.0.0.1:0".into(), 300, 5, 4, RetryPolicy::default()).unwrap(),
-        log_cfg.clone(),
-        DssConfig {
-            rules_path: PathBuf::from("../../knowledge/rules.toml"),
-            state_path: temp_state.clone(),
-        },
-        NbuMetricsConfig {
+    let config = AppConfig::builder()
+        .server(
+            ServerConfig::builder()
+                .bind_addr("127.0.0.1:0")
+                .poll_interval_secs(300)
+                .request_timeout_secs(5)
+                .max_concurrent_requests(4)
+                .build()
+                .unwrap(),
+        )
+        .logging(log_cfg.clone())
+        .dss(DssConfig {
+            rules_path,
+            state_path: temp_state,
+        })
+        .nbu_metrics(NbuMetricsConfig {
             enabled: true,
             url: format!("{mock_base}/nbu"),
             currencies: vec!["USD".into()],
-        },
-        vec![HttpSiteConfig {
+        })
+        .http_sites(vec![HttpSiteConfig {
             id: "mock-site".into(),
             name: "Mock Portal".into(),
             url: format!("{mock_base}/page"),
             category: "mock".into(),
-        }],
-        vec![NewsFeedConfig {
+        }])
+        .news_feeds(vec![NewsFeedConfig {
             id: "mock-feed".into(),
             name: "Mock Security Feed".into(),
             group: "cybersecurity".into(),
             url: format!("{mock_base}/rss"),
             keywords: vec![
-                KeywordCriterion::new("critical".into(), 3.0).unwrap(),
-                KeywordCriterion::new("cve".into(), 2.5).unwrap(),
+                KeywordCriterion::new("critical", 3.0).unwrap(),
+                KeywordCriterion::new("cve", 2.5).unwrap(),
             ],
-        }],
-    )
-    .unwrap();
+        }])
+        .build()
+        .unwrap();
 
     let (file_writer, guard) = build_rotating_appender(&log_cfg).unwrap();
     let subscriber = tracing_subscriber::registry()
@@ -157,7 +159,7 @@ async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
     // 1. Повний цикл опитування мок-джерел під ротованим файловим логером
     agent.poll_once().with_subscriber(dispatch.clone()).await;
 
-    let router = build_router_with_frontend_dir(agent, temp_frontend_dir.clone());
+    let router = build_router_with_frontend_dir(agent, temp_frontend_dir);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_handle = tokio::spawn(
@@ -276,7 +278,34 @@ async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
         .unwrap();
     assert_eq!(unacked["snapshot"]["sites"][0]["acknowledged"], false);
 
-    // 6. POST /api/dss/fact → ручне додавання факту та перевірка перерахунку ІСППР і /api/state
+    // 6. Валідація POST /api/dss/fact (некоректний CF та невідоме поле відхиляються)
+    for bad_cf in [-0.1_f64, 1.5_f64] {
+        let resp = client
+            .post(format!("{base}/api/dss/fact"))
+            .json(&serde_json::json!({
+                "key": "nbu_rate_usd",
+                "value": "43.25",
+                "cf": bad_cf
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+
+    let unknown_field_resp = client
+        .post(format!("{base}/api/dss/fact"))
+        .json(&serde_json::json!({
+            "key": "nbu_rate_usd",
+            "value": "43.25",
+            "extra_typo": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(unknown_field_resp.status().is_client_error());
+
+    // 7. POST /api/dss/fact → ручне додавання факту та перевірка перерахунку ІСППР і /api/state
     let updated: serde_json::Value = client
         .post(format!("{base}/api/dss/fact"))
         .json(&serde_json::json!({
@@ -309,7 +338,7 @@ async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
         .unwrap();
     assert_eq!(state_json["manual_facts"]["nbu_rate_usd"]["value"], 43.25);
 
-    // 7. POST /api/dss/fact/clear
+    // 8. POST /api/dss/fact/clear
     let cleared: serde_json::Value = client
         .post(format!("{base}/api/dss/fact/clear"))
         .send()
@@ -331,7 +360,7 @@ async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
     drop(dispatch);
     drop(guard);
 
-    // 8. Перевіряємо ротований append-only лог-файл
+    // 9. Перевіряємо ротований append-only лог-файл
     let entries: Vec<PathBuf> = std::fs::read_dir(&temp_log_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -350,43 +379,44 @@ async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
     assert!(log_content.contains("web_agent"));
     assert!(log_content.contains("Цикл Web-агента завершено"));
     assert!(log_content.contains("poll=1"));
-
-    let _ = std::fs::remove_file(&temp_state);
-    let _ = std::fs::remove_dir_all(&temp_log_dir);
-    let _ = std::fs::remove_dir_all(&temp_frontend_dir);
 }
 
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn dev_redirect_mode_redirects_ui_routes_and_keeps_api_routes() {
-    let temp_state = PathBuf::from(format!(
-        "/tmp/web_agent_server_dev_redirect_{}.json",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&temp_state);
+    let temp_dir = TempDir::new().unwrap();
+    let rules_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../knowledge/rules.toml");
 
-    let config = AppConfig::new(
-        ServerConfig::new("127.0.0.1:0".into(), 300, 5, 4, RetryPolicy::default()).unwrap(),
-        LoggingConfig::new(
-            PathBuf::from("/tmp/web_agent_dev_redirect_logs"),
-            "dev-test.log".to_string(),
-            LogRotation::Daily,
-            3,
+    let config = AppConfig::builder()
+        .server(
+            ServerConfig::builder()
+                .bind_addr("127.0.0.1:0")
+                .poll_interval_secs(300)
+                .request_timeout_secs(5)
+                .max_concurrent_requests(4)
+                .build()
+                .unwrap(),
         )
-        .unwrap(),
-        DssConfig {
-            rules_path: PathBuf::from("../../knowledge/rules.toml"),
-            state_path: temp_state.clone(),
-        },
-        NbuMetricsConfig {
+        .logging(
+            LoggingConfig::builder()
+                .dir(temp_dir.path().join("logs"))
+                .file_prefix("dev-test.log")
+                .rotation(LogRotation::Never)
+                .max_files(3)
+                .build()
+                .unwrap(),
+        )
+        .dss(DssConfig {
+            rules_path,
+            state_path: temp_dir.path().join("state.json"),
+        })
+        .nbu_metrics(NbuMetricsConfig {
             enabled: false,
             url: "http://127.0.0.1:9/nbu".into(),
             currencies: vec![],
-        },
-        vec![],
-        vec![],
-    )
-    .unwrap();
+        })
+        .build()
+        .unwrap();
 
     let kb = KnowledgeBase::load_from_file(&config.dss.rules_path).unwrap();
     let agent = WebAgent::new(config, InferenceEngine::new(kb)).unwrap();
@@ -437,21 +467,19 @@ async fn dev_redirect_mode_redirects_ui_routes_and_keeps_api_routes() {
 
     server_handle.abort();
     let _ = server_handle.await;
-    let _ = std::fs::remove_file(&temp_state);
 }
 
 #[test]
 fn rotating_file_appender_creates_and_appends_log_file() {
-    let temp_dir = PathBuf::from(format!("/tmp/web_agent_log_test_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    let temp_dir = TempDir::new().unwrap();
 
-    let cfg = LoggingConfig::new(
-        temp_dir.clone(),
-        "server-test.log".to_string(),
-        LogRotation::Daily,
-        3,
-    )
-    .unwrap();
+    let cfg = LoggingConfig::builder()
+        .dir(temp_dir.path())
+        .file_prefix("server-test.log")
+        .rotation(LogRotation::Never)
+        .max_files(3)
+        .build()
+        .unwrap();
 
     {
         let (mut writer, _guard) = build_rotating_appender(&cfg).unwrap();
@@ -463,7 +491,7 @@ fn rotating_file_appender_creates_and_appends_log_file() {
         writeln!(writer, "second log line").unwrap();
     }
 
-    let entries: Vec<PathBuf> = std::fs::read_dir(&temp_dir)
+    let entries: Vec<PathBuf> = std::fs::read_dir(temp_dir.path())
         .unwrap()
         .map(|e| e.unwrap().path())
         .collect();
@@ -479,6 +507,4 @@ fn rotating_file_appender_creates_and_appends_log_file() {
     let content = std::fs::read_to_string(&entries[0]).unwrap();
     assert!(content.contains("first log line"));
     assert!(content.contains("second log line"));
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
 }

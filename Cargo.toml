@@ -9,22 +9,28 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.100"
 
 [workspace.dependencies]
 axum = { version = "0.8.9", features = ["ws"] }
+bon = "3.10.3"
+color-eyre = "0.6.5"
 feed-rs = "3.0.0"
 hashbrown = { version = "0.17.2", features = ["serde"] }
 hex = "0.4.3"
 html-escape = "0.3.1"
 html2text = "0.17.4"
+parking_lot = "0.12.5"
 proptest = "1.12.0"
 reqwest = { version = "0.13.5", features = ["json", "gzip", "deflate"] }
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde-well-known", "formatting", "parsing", "macros"] }
-tokio = { version = "1.54.1", features = ["full"] }
+tokio = { version = "1.54.1", features = ["fs", "rt", "sync", "time"] }
+tokio-util = "0.7.20"
 toml = "1.2.2"
 tower = { version = "0.5.3", features = ["limit", "timeout"] }
 tower-http = { version = "0.7.1", features = ["trace", "compression-gzip", "fs"] }
@@ -34,3 +40,33 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 dss = { path = "crates/dss" }
 web-agent = { path = "crates/agent" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+
+# Selective pedantic / nursery / restriction lints (rust-skills)
+unwrap_used = "deny"
+cast_possible_truncation = "warn"
+doc_markdown = "warn"
+explicit_iter_loop = "warn"
+map_unwrap_or = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

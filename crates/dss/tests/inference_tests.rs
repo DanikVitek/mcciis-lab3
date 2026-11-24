@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use dss::{
     Fact,
@@ -11,52 +12,64 @@ use dss::{
 
 #[test]
 fn deserialization_validates_rules_via_factory() {
-    let invalid_cf = r#"
-[[rules]]
-id = "R1"
-name = "Invalid CF"
-severity = "high"
-cf = 1.5
-conditions = [{ fact = "x", op = "gt", value = 1.0 }]
-recommendation = "Test"
-"#;
-    assert!(toml::from_str::<KnowledgeBase>(invalid_cf).is_err());
+    let invalid_cf = toml::toml! {
+        [[rules]]
+        id = "R1"
+        name = "Invalid CF"
+        severity = "high"
+        cf = 1.5
+        conditions = [{ fact = "x", op = "gt", value = 1.0 }]
+        recommendation = "Test"
+    };
+    assert!(invalid_cf.try_into::<KnowledgeBase>().is_err());
 
-    let empty_conditions = r#"
-[[rules]]
-id = "R2"
-name = "No conditions"
-severity = "info"
-cf = 0.8
-conditions = []
-recommendation = "Test"
-"#;
-    assert!(toml::from_str::<KnowledgeBase>(empty_conditions).is_err());
+    let empty_conditions = toml::toml! {
+        [[rules]]
+        id = "R2"
+        name = "No conditions"
+        severity = "info"
+        cf = 0.8
+        conditions = []
+        recommendation = "Test"
+    };
+    assert!(empty_conditions.try_into::<KnowledgeBase>().is_err());
 
-    let duplicate_ids = r#"
-[[rules]]
-id = "DUP"
-name = "One"
-severity = "info"
-cf = 0.8
-conditions = [{ fact = "x", op = "eq", value = 1.0 }]
-recommendation = "A"
+    let duplicate_ids = toml::toml! {
+        [[rules]]
+        id = "DUP"
+        name = "One"
+        severity = "info"
+        cf = 0.8
+        conditions = [{ fact = "x", op = "eq", value = 1.0 }]
+        recommendation = "A"
 
-[[rules]]
-id = "DUP"
-name = "Two"
-severity = "info"
-cf = 0.7
-conditions = [{ fact = "y", op = "eq", value = 2.0 }]
-recommendation = "B"
-"#;
-    assert!(toml::from_str::<KnowledgeBase>(duplicate_ids).is_err());
+        [[rules]]
+        id = "DUP"
+        name = "Two"
+        severity = "info"
+        cf = 0.7
+        conditions = [{ fact = "y", op = "eq", value = 2.0 }]
+        recommendation = "B"
+    };
+    assert!(duplicate_ids.try_into::<KnowledgeBase>().is_err());
+
+    let unknown_field = toml::toml! {
+        [[rules]]
+        id = "R_TYPO"
+        name = "Typo"
+        severity = "info"
+        cf = 0.8
+        priorty = 10
+        conditions = [{ fact = "x", op = "eq", value = 1.0 }]
+        recommendation = "A"
+    };
+    assert!(unknown_field.try_into::<KnowledgeBase>().is_err());
 }
 
 #[test]
 fn forward_chaining_and_mycin_cf_combination() {
-    let kb = KnowledgeBase::load_from_file("../../knowledge/rules.toml")
-        .expect("knowledge/rules.toml should parse");
+    let rules_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../knowledge/rules.toml");
+    let kb = KnowledgeBase::load_from_file(&rules_path).expect("knowledge/rules.toml should parse");
     let engine = InferenceEngine::new(kb);
 
     let mut facts = BTreeMap::new();

@@ -1,3 +1,7 @@
+//! Автономний інтелектуальний Web-агент для моніторингу HTTP/HTTPS-сайтів,
+//! ранжування новинних стрічок RSS/Atom, збору метрик НБУ та автоматичного
+//! поповнення бази знань ІСППР.
+
 pub mod config;
 pub mod error;
 pub mod extractor;
@@ -6,7 +10,11 @@ pub mod health;
 pub mod http_monitor;
 pub mod nbu;
 
-use std::collections::BTreeMap;
+use std::collections::{
+    BTreeMap,
+    VecDeque,
+};
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{
@@ -25,6 +33,7 @@ use hashbrown::{
     HashMap,
     HashSet,
 };
+use parking_lot::RwLock;
 use reqwest::Client;
 use serde::{
     Deserialize,
@@ -32,13 +41,15 @@ use serde::{
 };
 use time::OffsetDateTime;
 use tokio::sync::{
+    Mutex,
     Notify,
-    RwLock,
     Semaphore,
     broadcast,
 };
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{
+    error,
     info,
     warn,
 };
@@ -74,6 +85,7 @@ use crate::nbu::{
 const MAX_RECENT_LOGS: usize = 30;
 const UPDATE_CHANNEL_CAPACITY: usize = 32;
 
+/// Тип push-події Web-агента, що транслюється клієнтам через WebSocket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentUpdateKind {
@@ -83,6 +95,7 @@ pub enum AgentUpdateKind {
     StateChanged,
 }
 
+/// Компактна подія життєвого циклу Web-агента для push-оновлень інтерфейсу.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentUpdateEvent {
     pub kind: AgentUpdateKind,
@@ -97,6 +110,8 @@ pub struct AgentUpdateEvent {
 }
 
 impl AgentUpdateEvent {
+    /// Формує подію оновлення на основі поточного знімка стану агента.
+    #[must_use]
     pub fn from_snapshot(kind: AgentUpdateKind, snapshot: &AgentSnapshot) -> Self {
         let changed_count = snapshot
             .sites
@@ -116,6 +131,7 @@ impl AgentUpdateEvent {
     }
 }
 
+/// Запис журналу подій Web-агента для відображення в інтерфейсі.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentLogEntry {
     #[serde(with = "time::serde::rfc3339")]
@@ -123,6 +139,7 @@ pub struct AgentLogEntry {
     pub message: String,
 }
 
+/// Стан моніторингу окремої стрічки новин.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FeedMonitorState {
     pub id: String,
@@ -135,6 +152,8 @@ pub struct FeedMonitorState {
 }
 
 impl FeedMonitorState {
+    /// Ініціалізує початковий стан стрічки новин із конфігурації.
+    #[must_use]
     pub fn from_config(cfg: &NewsFeedConfig) -> Self {
         Self {
             id: cfg.id.clone(),
@@ -147,6 +166,7 @@ impl FeedMonitorState {
     }
 }
 
+/// Повний знімок стану автономного Web-агента та результатів виводу ІСППР.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AgentSnapshot {
     pub sites: Vec<HttpSiteState>,
@@ -165,11 +185,12 @@ pub struct AgentSnapshot {
     pub last_poll_duration_ms: Option<u64>,
     #[serde(default)]
     pub poll_in_progress: bool,
-    pub recent_logs: Vec<AgentLogEntry>,
+    pub recent_logs: VecDeque<AgentLogEntry>,
 }
 
 impl AgentSnapshot {
     /// Об'єднана робоча пам'ять ІСППР: факти Web-агента + ручні факти користувача (з пріоритетом) + виведені факти.
+    #[must_use]
     pub fn all_facts(&self) -> BTreeMap<String, Fact> {
         let mut combined = self.base_facts();
         for (k, v) in &self.inference.inferred_facts {
@@ -178,6 +199,8 @@ impl AgentSnapshot {
         combined
     }
 
+    /// Базова робоча пам'ять: факти Web-агента з пріоритетним перекриттям ручними фактами.
+    #[must_use]
     pub fn base_facts(&self) -> BTreeMap<String, Fact> {
         let mut base = self.agent_facts.clone();
         for (k, v) in &self.manual_facts {
@@ -187,35 +210,73 @@ impl AgentSnapshot {
     }
 
     fn push_log(&mut self, message: impl Into<String>) {
-        self.recent_logs.insert(
-            0,
-            AgentLogEntry {
-                timestamp: OffsetDateTime::now_utc(),
-                message: message.into(),
-            },
-        );
+        self.recent_logs.push_front(AgentLogEntry {
+            timestamp: OffsetDateTime::now_utc(),
+            message: message.into(),
+        });
         self.recent_logs.truncate(MAX_RECENT_LOGS);
     }
 }
 
+/// RAII-запобіжник, що гарантує скидання `poll_in_progress` навіть при скасуванні або паніці.
+struct PollProgressGuard {
+    state: Arc<RwLock<Arc<AgentSnapshot>>>,
+    active: bool,
+}
+
+impl PollProgressGuard {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PollProgressGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let mut guard = self.state.write();
+            let snap = Arc::make_mut(&mut *guard);
+            snap.poll_in_progress = false;
+        }
+    }
+}
+
+/// Автономний Web-агент із фоновим опитуванням, персистентністю стану та push-подіями.
 #[derive(Clone)]
 pub struct WebAgent {
     config: Arc<AppConfig>,
     client: Client,
     engine: Arc<InferenceEngine>,
-    state: Arc<RwLock<AgentSnapshot>>,
+    state: Arc<RwLock<Arc<AgentSnapshot>>>,
+    poll_lock: Arc<Mutex<()>>,
+    persist_lock: Arc<Mutex<()>>,
     poll_trigger: Arc<Notify>,
     updates_tx: broadcast::Sender<AgentUpdateEvent>,
 }
 
+impl fmt::Debug for WebAgent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebAgent")
+            .field("bind_addr", &self.config.server.bind_addr)
+            .field("sites_count", &self.config.http_sites.len())
+            .field("feeds_count", &self.config.news_feeds.len())
+            .field("rules_count", &self.engine.rules().len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl WebAgent {
+    /// Ініціалізує Web-агент, HTTP-клієнт і відновлює збережений стан із диску (якщо він існує).
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`AgentError::Http`], якщо не вдалося сконструювати `reqwest::Client`.
     pub fn new(config: AppConfig, engine: InferenceEngine) -> AgentResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.server.request_timeout_secs))
             .user_agent("WebAgentDSS/0.1 (Academic Research Lab 3; Rust/reqwest)")
             .build()?;
 
-        let mut snapshot = load_persisted_snapshot(&config.dss.state_path).unwrap_or_default();
+        let mut snapshot = load_persisted_snapshot(&config.dss.state_path);
         snapshot.poll_in_progress = false;
         reconcile_sites(&mut snapshot.sites, &config);
         reconcile_feeds(&mut snapshot.feeds, &config);
@@ -231,28 +292,56 @@ impl WebAgent {
             config: Arc::new(config),
             client,
             engine: Arc::new(engine),
-            state: Arc::new(RwLock::new(snapshot)),
+            state: Arc::new(RwLock::new(Arc::new(snapshot))),
+            poll_lock: Arc::new(Mutex::new(())),
+            persist_lock: Arc::new(Mutex::new(())),
             poll_trigger: Arc::new(Notify::new()),
             updates_tx,
         })
     }
 
+    /// Повертає розділене посилання на незмінну конфігурацію агента.
+    #[must_use]
     pub fn config(&self) -> &AppConfig {
         &self.config
     }
 
+    /// Повертає `Arc` на незмінну конфігурацію агента без клонування даних.
+    #[must_use]
+    pub fn config_arc(&self) -> Arc<AppConfig> {
+        Arc::clone(&self.config)
+    }
+
+    /// Повертає посилання на машину логічного виводу ІСППР.
+    #[must_use]
     pub fn engine(&self) -> &InferenceEngine {
         &self.engine
     }
 
-    pub async fn snapshot(&self) -> AgentSnapshot {
-        self.state.read().await.clone()
+    /// Повертає поточний знімок стану за `O(1)` (лічильник посилань `Arc` без глибокого копіювання).
+    #[must_use]
+    pub fn snapshot(&self) -> Arc<AgentSnapshot> {
+        Arc::clone(&self.state.read())
     }
 
+    /// Знаходить одну статтю за ідентифікатором без клонування всього знімка.
+    #[must_use]
+    pub fn article_by_id(&self, id: &str) -> Option<NewsArticle> {
+        self.state
+            .read()
+            .articles
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
+    }
+
+    /// Підписується на потік push-подій Web-агента.
+    #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<AgentUpdateEvent> {
         self.updates_tx.subscribe()
     }
 
+    /// Ініціює позачерговий цикл опитування у фоновому циклі.
     pub fn request_immediate_poll(&self) {
         self.poll_trigger.notify_one();
     }
@@ -263,18 +352,38 @@ impl WebAgent {
             .send(AgentUpdateEvent::from_snapshot(kind, snapshot));
     }
 
-    /// Фоновий неблокуючий цикл опитування (п. 6 методички).
-    pub async fn run_background_loop(self) {
+    async fn persist_state_checked(&self, snapshot: Arc<AgentSnapshot>) {
+        let _guard = self.persist_lock.lock().await;
+        if let Err(err) = persist_snapshot(&self.config.dss.state_path, snapshot).await {
+            warn!(
+                path = %self.config.dss.state_path.display(),
+                error = %err,
+                "Не вдалося зберегти стан агента на диск"
+            );
+        }
+    }
+
+    /// Фоновий неблокуючий цикл опитування (п. 6 методички) із кооперативним завершенням.
+    pub async fn run_background_loop(self, shutdown: CancellationToken) {
         let interval = Duration::from_secs(self.config.server.poll_interval_secs);
 
-        self.poll_once().await;
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            () = self.poll_once() => {}
+        }
 
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(interval) => {
+                biased;
+                () = shutdown.cancelled() => {
+                    info!("Фоновий цикл Web-агента отримав сигнал завершення");
+                    break;
+                }
+                () = tokio::time::sleep(interval) => {
                     self.poll_once().await;
                 }
-                _ = self.poll_trigger.notified() => {
+                () = self.poll_trigger.notified() => {
                     self.poll_once().await;
                 }
             }
@@ -284,41 +393,51 @@ impl WebAgent {
     /// Один відмовостійкий цикл збору даних Web-агента та оновлення БЗ ІСППР.
     /// Помилка окремого джерела переводить його в режим експоненційного backoff,
     /// а після серії помилок парсингу вимикає лише проблемне джерело без зупинки агента.
+    #[tracing::instrument(skip(self))]
     pub async fn poll_once(&self) {
+        let Ok(_poll_guard) = self.poll_lock.try_lock() else {
+            return;
+        };
+
         let poll_start_utc = OffsetDateTime::now_utc();
 
         let (eligible_sites, eligible_feeds, nbu_eligible, previous_currencies, started_event) = {
-            let mut guard = self.state.write().await;
-            if guard.poll_in_progress {
+            let mut guard = self.state.write();
+            let snap = Arc::make_mut(&mut *guard);
+            if snap.poll_in_progress {
                 return;
             }
-            guard.poll_in_progress = true;
+            snap.poll_in_progress = true;
 
-            let eligible_sites: HashSet<String> = guard
+            let eligible_sites: HashSet<String> = snap
                 .sites
                 .iter()
                 .filter(|s| s.health.should_poll(poll_start_utc))
                 .map(|s| s.id.clone())
                 .collect();
-            let eligible_feeds: HashSet<String> = guard
+            let eligible_feeds: HashSet<String> = snap
                 .feeds
                 .iter()
                 .filter(|f| f.health.should_poll(poll_start_utc))
                 .map(|f| f.id.clone())
                 .collect();
             let nbu_eligible =
-                self.config.nbu_metrics.enabled && guard.nbu_health.should_poll(poll_start_utc);
+                self.config.nbu_metrics.enabled && snap.nbu_health.should_poll(poll_start_utc);
 
-            let started_event =
-                AgentUpdateEvent::from_snapshot(AgentUpdateKind::PollStarted, &guard);
+            let started_event = AgentUpdateEvent::from_snapshot(AgentUpdateKind::PollStarted, snap);
 
             (
                 eligible_sites,
                 eligible_feeds,
                 nbu_eligible,
-                guard.currencies.clone(),
+                snap.currencies.clone(),
                 started_event,
             )
+        };
+
+        let mut progress_guard = PollProgressGuard {
+            state: Arc::clone(&self.state),
+            active: true,
         };
 
         let _ = self.updates_tx.send(started_event);
@@ -335,11 +454,19 @@ impl WebAgent {
                 continue;
             }
             let client = self.client.clone();
-            let sem = semaphore.clone();
+            let sem = Arc::clone(&semaphore);
             let id = site.id.clone();
             let url = site.url.clone();
             site_tasks.spawn(async move {
-                let _permit = sem.acquire_owned().await.ok();
+                let Ok(_permit) = sem.acquire_owned().await else {
+                    return (
+                        id,
+                        Err(crate::http_monitor::SiteProbeError {
+                            kind: ErrorKind::Transient,
+                            message: "семафор обмеження запитів закрито".to_string(),
+                        }),
+                    );
+                };
                 let probe = probe_site(&client, &url).await;
                 (id, probe)
             });
@@ -352,17 +479,26 @@ impl WebAgent {
                 continue;
             }
             let client = self.client.clone();
-            let sem = semaphore.clone();
+            let sem = Arc::clone(&semaphore);
             let feed_cfg = feed.clone();
             feed_tasks.spawn(async move {
-                let _permit = sem.acquire_owned().await.ok();
+                let Ok(_permit) = sem.acquire_owned().await else {
+                    return (
+                        feed_cfg.id,
+                        feed_cfg.name,
+                        Err(AgentError::Config(
+                            "семафор обмеження запитів закрито".to_string(),
+                        )),
+                    );
+                };
                 let res = fetch_and_rank_feed(&client, &feed_cfg).await;
                 (feed_cfg.id, feed_cfg.name, res)
             });
         }
 
-        // 3. Опитування API НБУ (якщо увімкнено, не вимкнено та не в backoff)
+        // 3. Опитування API НБУ з урахуванням глобального ліміту паралельних запитів
         let nbu_res = if nbu_eligible {
+            let _permit = semaphore.acquire().await.ok();
             Some(
                 fetch_nbu_rates(&self.client, &self.config.nbu_metrics, &previous_currencies).await,
             )
@@ -370,19 +506,25 @@ impl WebAgent {
             None
         };
 
-        let mut site_results = HashMap::new();
+        let mut site_results = HashMap::with_capacity(eligible_sites.len());
         while let Some(joined) = site_tasks.join_next().await {
-            if let Ok((id, probe)) = joined {
-                site_results.insert(id, probe);
+            match joined {
+                Ok((id, probe)) => {
+                    site_results.insert(id, probe);
+                }
+                Err(join_err) => {
+                    error!(error = %join_err, "Внутрішній збій завдання моніторингу HTTP-сайту");
+                }
             }
         }
 
-        let mut updated_feed_articles: HashMap<String, Vec<NewsArticle>> = HashMap::new();
+        let mut updated_feed_articles: HashMap<String, Vec<NewsArticle>> =
+            HashMap::with_capacity(eligible_feeds.len());
         let mut feed_outcomes: HashMap<String, (String, Result<usize, AgentError>)> =
-            HashMap::new();
+            HashMap::with_capacity(eligible_feeds.len());
         while let Some(joined) = feed_tasks.join_next().await {
-            if let Ok((feed_id, feed_name, res)) = joined {
-                match res {
+            match joined {
+                Ok((feed_id, feed_name, res)) => match res {
                     Ok(items) => {
                         let count = items.len();
                         updated_feed_articles.insert(feed_id.clone(), items);
@@ -392,20 +534,24 @@ impl WebAgent {
                         warn!(feed = %feed_name, error = %err, "Помилка збору/парсингу стрічки новин");
                         feed_outcomes.insert(feed_id, (feed_name, Err(err)));
                     }
+                },
+                Err(join_err) => {
+                    error!(error = %join_err, "Внутрішній збій завдання збору стрічки новин");
                 }
             }
         }
 
-        let duration_ms = started.elapsed().as_millis() as u64;
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let now = OffsetDateTime::now_utc();
         let policy = &self.config.server.retry_policy;
 
         let snapshot_to_save = {
-            let mut guard = self.state.write().await;
+            let mut guard = self.state.write();
+            let snap = Arc::make_mut(&mut *guard);
             let mut new_logs = Vec::new();
 
             // Оновлення стану HTTP-сайтів із backoff / авто-вимкненням
-            for site_state in &mut guard.sites {
+            for site_state in &mut snap.sites {
                 if let Some(probe_res) = site_results.remove(&site_state.id)
                     && let Some(transition) = apply_probe(site_state, probe_res, policy)
                 {
@@ -435,8 +581,8 @@ impl WebAgent {
             }
 
             // Оновлення стану стрічок новин із backoff та вимкненням після серії помилок парсингу
-            let mut feeds_to_replace = HashSet::new();
-            for feed_state in &mut guard.feeds {
+            let mut feeds_to_replace = HashSet::with_capacity(feed_outcomes.len());
+            for feed_state in &mut snap.feeds {
                 if let Some((feed_name, outcome)) = feed_outcomes.remove(&feed_state.id) {
                     match outcome {
                         Ok(count) => {
@@ -475,32 +621,25 @@ impl WebAgent {
                 }
             }
 
-            guard
-                .articles
+            snap.articles
                 .retain(|a| !feeds_to_replace.contains(&a.feed_id));
             for (_, mut items) in updated_feed_articles {
-                guard.articles.append(&mut items);
+                snap.articles.append(&mut items);
             }
-            guard.articles.sort_by(|a, b| {
-                b.relevance_score
-                    .total_cmp(&a.relevance_score)
-                    .then_with(|| b.matched_keywords.len().cmp(&a.matched_keywords.len()))
-                    .then_with(|| a.title.cmp(&b.title))
-            });
+            snap.articles.sort_by(NewsArticle::cmp_relevance);
 
             // Оновлення стану API НБУ із backoff / авто-вимкненням
             if let Some(res) = nbu_res {
                 match res {
                     Ok(rates) => {
-                        guard.nbu_health.record_success(now);
-                        guard.currencies = rates;
+                        snap.nbu_health.record_success(now);
+                        snap.currencies = rates;
                     }
                     Err(err) => {
                         warn!(error = %err, "Помилка отримання/парсингу курсів НБУ");
                         let kind = classify_error(&err);
                         let transition =
-                            guard
-                                .nbu_health
+                            snap.nbu_health
                                 .record_failure(now, kind, err.to_string(), policy);
                         match transition {
                             FailureTransition::Disabled { attempts } => {
@@ -523,27 +662,28 @@ impl WebAgent {
             }
 
             for msg in new_logs {
-                guard.push_log(msg);
+                snap.push_log(msg);
             }
 
-            self.recompute_dss_locked(&mut guard);
+            self.recompute_dss_locked(snap);
 
-            guard.last_poll_at = Some(now);
-            guard.poll_count = guard.poll_count.saturating_add(1);
-            guard.last_poll_duration_ms = Some(duration_ms);
-            guard.poll_in_progress = false;
+            snap.last_poll_at = Some(now);
+            snap.poll_count = snap.poll_count.saturating_add(1);
+            snap.last_poll_duration_ms = Some(duration_ms);
+            snap.poll_in_progress = false;
+            progress_guard.disarm();
 
-            let poll_num = guard.poll_count;
-            let changed_count = guard
+            let poll_num = snap.poll_count;
+            let changed_count = snap
                 .sites
                 .iter()
                 .filter(|s| s.is_visible_in_changed_table())
                 .count();
-            let articles_count = guard.articles.len();
-            let decisions_count = guard.inference.decisions.len();
-            let facts_count = guard.agent_facts.len();
+            let articles_count = snap.articles.len();
+            let decisions_count = snap.inference.decisions.len();
+            let facts_count = snap.agent_facts.len();
 
-            guard.push_log(format!(
+            snap.push_log(format!(
                 "Цикл #{poll_num} завершено за {duration_ms} мс: змінених сайтів — {changed_count}, новин — {articles_count}, фактів БЗ — {facts_count}, рішень ІСППР — {decisions_count}.",
             ));
 
@@ -557,126 +697,129 @@ impl WebAgent {
                 "Цикл Web-агента завершено"
             );
 
-            guard.clone()
+            Arc::clone(&*guard)
         };
 
         self.emit_update(AgentUpdateKind::PollCompleted, &snapshot_to_save);
-
-        if let Err(err) = persist_snapshot(&self.config.dss.state_path, &snapshot_to_save) {
-            warn!(error = %err, "Не вдалося зберегти стан агента на диск");
-        }
+        self.persist_state_checked(snapshot_to_save).await;
     }
 
+    /// Позначає змінений HTTP-сайт як переглянутий.
     pub async fn acknowledge_site(&self, site_id: &str) -> bool {
-        let mut updated = false;
         let snapshot_to_save = {
-            let mut guard = self.state.write().await;
-            if let Some(site) = guard.sites.iter_mut().find(|s| s.id == site_id) {
+            let mut guard = self.state.write();
+            let found = guard.sites.iter().any(|s| s.id == site_id);
+            if !found {
+                return false;
+            }
+            let snap = Arc::make_mut(&mut *guard);
+            if let Some(site) = snap.sites.iter_mut().find(|s| s.id == site_id) {
                 site.acknowledged = true;
                 let site_name = site.name.clone();
-                updated = true;
-
-                self.recompute_dss_locked(&mut guard);
-                guard.push_log(format!("Сайт `{site_name}` позначено як переглянутий."));
+                self.recompute_dss_locked(snap);
+                snap.push_log(format!("Сайт `{site_name}` позначено як переглянутий."));
             }
-            updated.then(|| guard.clone())
+            Arc::clone(&*guard)
         };
 
-        if let Some(snap) = snapshot_to_save {
-            self.emit_update(AgentUpdateKind::StateChanged, &snap);
-            let _ = persist_snapshot(&self.config.dss.state_path, &snap);
-        }
-        updated
+        self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
+        self.persist_state_checked(snapshot_to_save).await;
+        true
     }
 
+    /// Повертає HTTP-сайт до списку непереглянутих змін.
     pub async fn unacknowledge_site(&self, site_id: &str) -> bool {
-        let mut updated = false;
         let snapshot_to_save = {
-            let mut guard = self.state.write().await;
-            if let Some(site) = guard.sites.iter_mut().find(|s| s.id == site_id) {
+            let mut guard = self.state.write();
+            let found = guard.sites.iter().any(|s| s.id == site_id);
+            if !found {
+                return false;
+            }
+            let snap = Arc::make_mut(&mut *guard);
+            if let Some(site) = snap.sites.iter_mut().find(|s| s.id == site_id) {
                 site.acknowledged = false;
                 site.changed = true;
-                updated = true;
-
-                self.recompute_dss_locked(&mut guard);
+                self.recompute_dss_locked(snap);
             }
-            updated.then(|| guard.clone())
+            Arc::clone(&*guard)
         };
 
-        if let Some(snap) = snapshot_to_save {
-            self.emit_update(AgentUpdateKind::StateChanged, &snap);
-            let _ = persist_snapshot(&self.config.dss.state_path, &snap);
-        }
-        updated
+        self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
+        self.persist_state_checked(snapshot_to_save).await;
+        true
     }
 
     /// Повторно увімкнути моніторинг HTTP-сайту та скинути backoff/лічильник помилок.
     pub async fn enable_site(&self, site_id: &str) -> bool {
-        let mut updated = false;
         let snapshot_to_save = {
-            let mut guard = self.state.write().await;
-            if let Some(site) = guard.sites.iter_mut().find(|s| s.id == site_id) {
+            let mut guard = self.state.write();
+            let found = guard.sites.iter().any(|s| s.id == site_id);
+            if !found {
+                return false;
+            }
+            let snap = Arc::make_mut(&mut *guard);
+            if let Some(site) = snap.sites.iter_mut().find(|s| s.id == site_id) {
                 site.health.reset_manual();
                 let site_name = site.name.clone();
-                updated = true;
-
-                self.recompute_dss_locked(&mut guard);
-                guard.push_log(format!(
+                self.recompute_dss_locked(snap);
+                snap.push_log(format!(
                     "Моніторинг сайту `{site_name}` повторно увімкнено."
                 ));
             }
-            updated.then(|| guard.clone())
+            Arc::clone(&*guard)
         };
 
-        if let Some(snap) = snapshot_to_save {
-            self.emit_update(AgentUpdateKind::StateChanged, &snap);
-            let _ = persist_snapshot(&self.config.dss.state_path, &snap);
-        }
-        updated
+        self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
+        self.persist_state_checked(snapshot_to_save).await;
+        true
     }
 
     /// Повторно увімкнути моніторинг стрічки новин та скинути backoff/лічильник помилок.
     pub async fn enable_feed(&self, feed_id: &str) -> bool {
-        let mut updated = false;
         let snapshot_to_save = {
-            let mut guard = self.state.write().await;
-            if let Some(feed) = guard.feeds.iter_mut().find(|f| f.id == feed_id) {
+            let mut guard = self.state.write();
+            let found = guard.feeds.iter().any(|f| f.id == feed_id);
+            if !found {
+                return false;
+            }
+            let snap = Arc::make_mut(&mut *guard);
+            if let Some(feed) = snap.feeds.iter_mut().find(|f| f.id == feed_id) {
                 feed.health.reset_manual();
                 let feed_name = feed.name.clone();
-                updated = true;
-
-                self.recompute_dss_locked(&mut guard);
-                guard.push_log(format!(
+                self.recompute_dss_locked(snap);
+                snap.push_log(format!(
                     "Моніторинг стрічки `{feed_name}` повторно увімкнено."
                 ));
             }
-            updated.then(|| guard.clone())
+            Arc::clone(&*guard)
         };
 
-        if let Some(snap) = snapshot_to_save {
-            self.emit_update(AgentUpdateKind::StateChanged, &snap);
-            let _ = persist_snapshot(&self.config.dss.state_path, &snap);
-        }
-        updated
+        self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
+        self.persist_state_checked(snapshot_to_save).await;
+        true
     }
 
     /// Повторно увімкнути моніторинг API НБУ та скинути backoff/лічильник помилок.
     pub async fn enable_nbu(&self) {
         let snapshot_to_save = {
-            let mut guard = self.state.write().await;
-            guard.nbu_health.reset_manual();
-            self.recompute_dss_locked(&mut guard);
-            guard.push_log("Моніторинг API НБУ повторно увімкнено.");
-            guard.clone()
+            let mut guard = self.state.write();
+            let snap = Arc::make_mut(&mut *guard);
+            snap.nbu_health.reset_manual();
+            self.recompute_dss_locked(snap);
+            snap.push_log("Моніторинг API НБУ повторно увімкнено.");
+            Arc::clone(&*guard)
         };
 
         self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
-        let _ = persist_snapshot(&self.config.dss.state_path, &snapshot_to_save);
+        self.persist_state_checked(snapshot_to_save).await;
     }
 
-    pub async fn upsert_manual_fact(&self, key: String, value: FactValue, cf: f64) {
+    /// Додає або оновлює ручний факт користувача та перераховує вивід ІСППР.
+    pub async fn upsert_manual_fact(&self, key: impl Into<String>, value: FactValue, cf: f64) {
+        let key = key.into();
         let snapshot_to_save = {
-            let mut guard = self.state.write().await;
+            let mut guard = self.state.write();
+            let snap = Arc::make_mut(&mut *guard);
             let fact = Fact::new(
                 key.clone(),
                 value.clone(),
@@ -684,52 +827,56 @@ impl WebAgent {
                 cf,
                 FactOrigin::Manual,
             );
-            guard.manual_facts.insert(key.clone(), fact);
+            let effective_cf = fact.cf;
+            snap.manual_facts.insert(key.clone(), fact);
 
-            let base_facts = guard.base_facts();
-            guard.inference = self.engine.evaluate(&base_facts);
-            guard.push_log(format!(
-                "Користувач додав факт `{key} = {value}` (CF={:.2}); ІСППР перерахувала вивід.",
-                cf.clamp(0.0, 1.0)
+            let base_facts = snap.base_facts();
+            snap.inference = self.engine.evaluate(&base_facts);
+            snap.push_log(format!(
+                "Користувач додав факт `{key} = {value}` (CF={effective_cf:.2}); ІСППР перерахувала вивід."
             ));
-            guard.clone()
+            Arc::clone(&*guard)
         };
 
         self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
-        let _ = persist_snapshot(&self.config.dss.state_path, &snapshot_to_save);
+        self.persist_state_checked(snapshot_to_save).await;
     }
 
+    /// Очищає всі ручні факти та відновлює вивід ІСППР лише на основі даних Web-агента.
     pub async fn clear_manual_facts(&self) {
         let snapshot_to_save = {
-            let mut guard = self.state.write().await;
-            guard.manual_facts.clear();
-            let base_facts = guard.base_facts();
-            guard.inference = self.engine.evaluate(&base_facts);
-            guard
-                .push_log("Ручні факти очищено; відновлено вивід лише на основі даних Web-агента.");
-            guard.clone()
+            let mut guard = self.state.write();
+            let snap = Arc::make_mut(&mut *guard);
+            snap.manual_facts.clear();
+            let base_facts = snap.base_facts();
+            snap.inference = self.engine.evaluate(&base_facts);
+            snap.push_log("Ручні факти очищено; відновлено вивід лише на основі даних Web-агента.");
+            Arc::clone(&*guard)
         };
 
         self.emit_update(AgentUpdateKind::StateChanged, &snapshot_to_save);
-        let _ = persist_snapshot(&self.config.dss.state_path, &snapshot_to_save);
+        self.persist_state_checked(snapshot_to_save).await;
     }
 
-    fn recompute_dss_locked(&self, guard: &mut AgentSnapshot) {
-        guard.agent_facts = extract_facts(
-            &guard.sites,
-            &guard.feeds,
-            &guard.articles,
-            &guard.currencies,
-            &guard.nbu_health,
+    fn recompute_dss_locked(&self, snap: &mut AgentSnapshot) {
+        snap.agent_facts = extract_facts(
+            &snap.sites,
+            &snap.feeds,
+            &snap.articles,
+            &snap.currencies,
+            &snap.nbu_health,
         );
-        let base_facts = guard.base_facts();
-        guard.inference = self.engine.evaluate(&base_facts);
+        let base_facts = snap.base_facts();
+        snap.inference = self.engine.evaluate(&base_facts);
     }
 }
 
 fn classify_error(err: &AgentError) -> ErrorKind {
     match err {
-        AgentError::FeedParse(_) | AgentError::Json(_) | AgentError::TomlDe(_) => ErrorKind::Parse,
+        AgentError::FeedParse(_)
+        | AgentError::Json(_)
+        | AgentError::TomlDe(_)
+        | AgentError::ResponseTooLarge { .. } => ErrorKind::Parse,
         AgentError::Http(req_err) if req_err.is_decode() || req_err.is_builder() => {
             ErrorKind::Parse
         }
@@ -769,18 +916,50 @@ fn reconcile_feeds(existing: &mut Vec<FeedMonitorState>, config: &AppConfig) {
     }
 }
 
-fn load_persisted_snapshot(path: &Path) -> Option<AgentSnapshot> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
+fn load_persisted_snapshot(path: &Path) -> AgentSnapshot {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return AgentSnapshot::default(),
+        Err(err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "Не вдалося прочитати збережений стан агента; використано порожній стан"
+            );
+            return AgentSnapshot::default();
+        }
+    };
+
+    match serde_json::from_str(&content) {
+        Ok(snap) => snap,
+        Err(err) => {
+            warn!(
+                path = %path.display(),
+                error = %err,
+                "Пошкоджений файл стану агента; використано порожній стан"
+            );
+            AgentSnapshot::default()
+        }
+    }
 }
 
-fn persist_snapshot(path: &Path, snapshot: &AgentSnapshot) -> AgentResult<()> {
+async fn persist_snapshot(path: &Path, snapshot: Arc<AgentSnapshot>) -> AgentResult<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
-    let json = serde_json::to_string_pretty(snapshot)?;
-    std::fs::write(path, json)?;
+
+    let json = tokio::task::spawn_blocking(move || serde_json::to_string_pretty(snapshot.as_ref()))
+        .await??;
+
+    let mut tmp_name = path
+        .file_name()
+        .map_or_else(|| std::ffi::OsString::from("state.json"), ToOwned::to_owned);
+    tmp_name.push(".tmp");
+    let tmp_path = path.with_file_name(tmp_name);
+
+    tokio::fs::write(&tmp_path, json).await?;
+    tokio::fs::rename(&tmp_path, path).await?;
     Ok(())
 }

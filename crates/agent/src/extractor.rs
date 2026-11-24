@@ -1,3 +1,5 @@
+//! Підсистема автоматичного вилучення формалізованих фактів ІСППР із даних Web-агента.
+
 use std::collections::BTreeMap;
 
 use dss::{
@@ -25,6 +27,7 @@ const CRITICAL_CYBER_TERMS: &[&str] = &[
 /// Підсистема автоматичного поповнення бази знань (п. 9–10 методички):
 /// трансформує зібрані Web-агентом дані (зміни HTTP-сайтів, проранжовані новини,
 /// виявлені CVE, стан джерел та числові курси НБУ) у формалізовані факти ІСППР.
+#[must_use]
 pub fn extract_facts(
     sites: &[HttpSiteState],
     feeds: &[FeedMonitorState],
@@ -78,20 +81,22 @@ pub fn extract_facts(
     );
 
     for site in sites {
+        let sanitized = sanitize_key(&site.id);
+        let source = format!("HTTP-монітор ({})", site.name);
         if let Some(size) = site.body_size {
             insert_fact(
                 &mut facts,
-                format!("site_{}_size_bytes", sanitize_key(&site.id)),
+                format!("site_{sanitized}_size_bytes"),
                 FactValue::Number(size as f64),
-                format!("HTTP-монітор ({})", site.name),
+                &source,
                 1.0,
             );
         }
         insert_fact(
             &mut facts,
-            format!("site_{}_changed", sanitize_key(&site.id)),
+            format!("site_{sanitized}_changed"),
             FactValue::Bool(site.is_visible_in_changed_table()),
-            format!("HTTP-монітор ({})", site.name),
+            source,
             1.0,
         );
     }
@@ -100,7 +105,7 @@ pub fn extract_facts(
     let mut cyber_articles = 0usize;
     let mut cyber_critical_articles = 0usize;
     let mut econ_articles = 0usize;
-    let mut unique_cves = HashSet::new();
+    let mut unique_cves: HashSet<&str> = HashSet::new();
     let mut top_score = 0.0_f64;
 
     for article in articles {
@@ -108,7 +113,7 @@ pub fn extract_facts(
             top_score = article.relevance_score;
         }
         for cve in &article.cves {
-            unique_cves.insert(cve.clone());
+            unique_cves.insert(cve.as_str());
         }
 
         let group_lower = article.group.to_lowercase();
@@ -175,8 +180,8 @@ pub fn extract_facts(
     );
 
     if !unique_cves.is_empty() {
-        let mut sorted_cves: Vec<String> = unique_cves.into_iter().collect();
-        sorted_cves.sort();
+        let mut sorted_cves: Vec<&str> = unique_cves.into_iter().collect();
+        sorted_cves.sort_unstable();
         insert_fact(
             &mut facts,
             "detected_cves",
@@ -263,15 +268,15 @@ fn insert_fact(
 }
 
 fn sanitize_key(raw: &str) -> String {
-    raw.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -366,9 +371,7 @@ mod tests {
                     } else {
                         vec![]
                     };
-                    let cves = cve_num
-                        .map(|n| vec![format!("CVE-2026-{n:04}")])
-                        .unwrap_or_default();
+                    let cves = cve_num.map_or_default(|n| vec![format!("CVE-2026-{n:04}")]);
                     NewsArticle {
                         id: format!("{i:016x}"),
                         feed_id: "f".into(),
@@ -422,14 +425,14 @@ mod tests {
             let cve_count = facts["cve_mentions_count"].value.to_f64().unwrap();
 
             prop_assert!(changed <= monitored);
-            prop_assert_eq!(monitored as usize, sites.len());
+            prop_assert!((monitored - sites.len() as f64).abs() < f64::EPSILON);
 
             let expected_disabled = sites.iter().filter(|s| s.health.disabled).count()
                 + feeds.iter().filter(|f| f.health.disabled).count()
                 + usize::from(nbu_disabled);
-            prop_assert_eq!(disabled as usize, expected_disabled);
+            prop_assert!((disabled - expected_disabled as f64).abs() < f64::EPSILON);
 
-            prop_assert_eq!(total_art as usize, articles.len());
+            prop_assert!((total_art - articles.len() as f64).abs() < f64::EPSILON);
             prop_assert!(cyber_crit <= cyber_art);
             prop_assert!(cyber_art <= total_art);
 
@@ -437,7 +440,7 @@ mod tests {
             if cve_count > 0.0 {
                 let text = facts["detected_cves"].value.to_text();
                 let list: Vec<&str> = text.split(", ").collect();
-                prop_assert_eq!(list.len(), cve_count as usize);
+                prop_assert!((list.len() as f64 - cve_count).abs() < f64::EPSILON);
                 for pair in list.windows(2) {
                     prop_assert!(pair[0] < pair[1]);
                 }

@@ -1,8 +1,11 @@
+//! Конфігурація Web-агента, логування, підсистеми ІСППР і зовнішніх джерел.
+
 use std::path::{
     Path,
     PathBuf,
 };
 
+use bon::bon;
 use hashbrown::HashSet;
 use serde::{
     Deserialize,
@@ -15,6 +18,7 @@ use crate::error::{
 };
 use crate::health::RetryPolicy;
 
+/// Повна валідована конфігурація застосунку.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "RawAppConfig")]
 pub struct AppConfig {
@@ -27,6 +31,7 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawAppConfig {
     server: ServerConfig,
     #[serde(default)]
@@ -44,17 +49,18 @@ impl TryFrom<RawAppConfig> for AppConfig {
     type Error = AgentError;
 
     fn try_from(raw: RawAppConfig) -> Result<Self, Self::Error> {
-        Self::new(
-            raw.server,
-            raw.logging,
-            raw.dss,
-            raw.nbu_metrics,
-            raw.http_sites,
-            raw.news_feeds,
-        )
+        Self::builder()
+            .server(raw.server)
+            .logging(raw.logging)
+            .dss(raw.dss)
+            .nbu_metrics(raw.nbu_metrics)
+            .http_sites(raw.http_sites)
+            .news_feeds(raw.news_feeds)
+            .build()
     }
 }
 
+/// Періодичність ротації файлових журналів.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogRotation {
@@ -66,7 +72,9 @@ pub enum LogRotation {
 }
 
 impl LogRotation {
-    pub fn as_str(self) -> &'static str {
+    /// Повертає рядкове позначення політики ротації.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Minutely => "minutely",
             Self::Hourly => "hourly",
@@ -76,6 +84,7 @@ impl LogRotation {
     }
 }
 
+/// Параметри файлового логування з ротацією.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "RawLoggingConfig")]
 pub struct LoggingConfig {
@@ -86,6 +95,7 @@ pub struct LoggingConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawLoggingConfig {
     #[serde(default = "default_log_dir")]
     dir: PathBuf,
@@ -101,16 +111,28 @@ impl TryFrom<RawLoggingConfig> for LoggingConfig {
     type Error = AgentError;
 
     fn try_from(raw: RawLoggingConfig) -> Result<Self, Self::Error> {
-        Self::new(raw.dir, raw.file_prefix, raw.rotation, raw.max_files)
+        Self::builder()
+            .dir(raw.dir)
+            .file_prefix(raw.file_prefix)
+            .rotation(raw.rotation)
+            .max_files(raw.max_files)
+            .build()
     }
 }
 
+#[bon]
 impl LoggingConfig {
+    /// Створює та валідує конфігурацію логування через типобезпечний builder (`bon`).
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`AgentError::Config`], якщо `dir` або `file_prefix` порожні чи `max_files == 0`.
+    #[builder(derive(Debug), on(String, into), on(PathBuf, into))]
     pub fn new(
-        dir: PathBuf,
-        file_prefix: String,
-        rotation: LogRotation,
-        max_files: usize,
+        #[builder(default = default_log_dir())] dir: PathBuf,
+        #[builder(default = default_log_prefix())] file_prefix: String,
+        #[builder(default)] rotation: LogRotation,
+        #[builder(default = default_log_max_files())] max_files: usize,
     ) -> AgentResult<Self> {
         if dir.as_os_str().is_empty() {
             return Err(AgentError::Config(
@@ -147,6 +169,7 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Мережеві та планувальні параметри сервера і Web-агента.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "RawServerConfig")]
 pub struct ServerConfig {
@@ -158,6 +181,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawServerConfig {
     bind_addr: String,
     #[serde(default = "default_poll_interval")]
@@ -174,23 +198,30 @@ impl TryFrom<RawServerConfig> for ServerConfig {
     type Error = AgentError;
 
     fn try_from(raw: RawServerConfig) -> Result<Self, Self::Error> {
-        Self::new(
-            raw.bind_addr,
-            raw.poll_interval_secs,
-            raw.request_timeout_secs,
-            raw.max_concurrent_requests,
-            raw.retry_policy,
-        )
+        Self::builder()
+            .bind_addr(raw.bind_addr)
+            .poll_interval_secs(raw.poll_interval_secs)
+            .request_timeout_secs(raw.request_timeout_secs)
+            .max_concurrent_requests(raw.max_concurrent_requests)
+            .retry_policy(raw.retry_policy)
+            .build()
     }
 }
 
+#[bon]
 impl ServerConfig {
+    /// Створює та валідує параметри сервера через типобезпечний builder (`bon`).
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`AgentError::Config`], якщо `bind_addr` порожній або будь-який числовий ліміт дорівнює 0.
+    #[builder(derive(Debug), on(String, into))]
     pub fn new(
         bind_addr: String,
-        poll_interval_secs: u64,
-        request_timeout_secs: u64,
-        max_concurrent_requests: usize,
-        retry_policy: RetryPolicy,
+        #[builder(default = default_poll_interval())] poll_interval_secs: u64,
+        #[builder(default = default_request_timeout())] request_timeout_secs: u64,
+        #[builder(default = default_max_concurrent())] max_concurrent_requests: usize,
+        #[builder(default)] retry_policy: RetryPolicy,
     ) -> AgentResult<Self> {
         if bind_addr.trim().is_empty() {
             return Err(AgentError::Config(
@@ -223,13 +254,21 @@ impl ServerConfig {
     }
 }
 
+/// Шляхи до бази знань і файлу збереження стану ІСППР.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DssConfig {
     pub rules_path: PathBuf,
     pub state_path: PathBuf,
 }
 
+/// Налаштування збору валютних метрик з API НБУ.
+///
+/// Якщо секція `[nbu_metrics]` повністю відсутня в конфігурації, використовується
+/// [`Default`] (`enabled = false`); якщо секція задана явно без поля `enabled`,
+/// `enabled` за замовчуванням дорівнює `true`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct NbuMetricsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -249,7 +288,9 @@ impl Default for NbuMetricsConfig {
     }
 }
 
+/// Конфігурація окремого HTTP/HTTPS-сайту для моніторингу змін.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpSiteConfig {
     pub id: String,
     pub name: String,
@@ -258,7 +299,9 @@ pub struct HttpSiteConfig {
     pub category: String,
 }
 
+/// Конфігурація RSS/Atom стрічки новин і її критеріїв ранжування.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct NewsFeedConfig {
     pub id: String,
     pub name: String,
@@ -268,6 +311,7 @@ pub struct NewsFeedConfig {
     pub keywords: Vec<KeywordCriterion>,
 }
 
+/// Ключове слово та його додатна вага для оцінки релевантності новини.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "RawKeywordCriterion")]
 pub struct KeywordCriterion {
@@ -276,6 +320,7 @@ pub struct KeywordCriterion {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawKeywordCriterion {
     word: String,
     #[serde(default = "default_weight")]
@@ -291,15 +336,21 @@ impl TryFrom<RawKeywordCriterion> for KeywordCriterion {
 }
 
 impl KeywordCriterion {
-    pub fn new(word: String, weight: f64) -> AgentResult<Self> {
+    /// Створює валідований критерій ключового слова.
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`AgentError::Config`], якщо `word` порожнє або `weight` не є скінченним додатним числом.
+    pub fn new(word: impl Into<String>, weight: f64) -> AgentResult<Self> {
+        let word = word.into();
         if word.trim().is_empty() {
             return Err(AgentError::Config(
-                "Ключове слово не може бути порожнім".to_string(),
+                "ключове слово не може бути порожнім".to_string(),
             ));
         }
         if !weight.is_finite() || weight <= 0.0 {
             return Err(AgentError::Config(format!(
-                "Вага ключового слова `{word}` має бути скінченним додатним числом"
+                "вага ключового слова `{word}` має бути скінченним додатним числом"
             )));
         }
         Ok(Self { word, weight })
@@ -314,23 +365,23 @@ fn default_log_prefix() -> String {
     "web-agent-server.log".to_string()
 }
 
-fn default_log_max_files() -> usize {
+const fn default_log_max_files() -> usize {
     7
 }
 
-fn default_poll_interval() -> u64 {
+const fn default_poll_interval() -> u64 {
     300
 }
 
-fn default_request_timeout() -> u64 {
+const fn default_request_timeout() -> u64 {
     15
 }
 
-fn default_max_concurrent() -> usize {
+const fn default_max_concurrent() -> usize {
     8
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -346,30 +397,51 @@ fn default_category() -> String {
     "general".to_string()
 }
 
-fn default_weight() -> f64 {
+const fn default_weight() -> f64 {
     1.0
 }
 
+fn is_http_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed.starts_with("http://") || trimmed.starts_with("https://")
+}
+
+#[bon]
 impl AppConfig {
+    /// Створює та валідує повну конфігурацію через типобезпечний builder (`bon`).
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`AgentError::Config`] при порожніх або дубльованих ідентифікаторах джерел
+    /// чи некоректній URL-схемі.
+    #[builder(derive(Debug))]
     pub fn new(
         server: ServerConfig,
-        logging: LoggingConfig,
+        #[builder(default)] logging: LoggingConfig,
         dss: DssConfig,
-        nbu_metrics: NbuMetricsConfig,
-        http_sites: Vec<HttpSiteConfig>,
-        news_feeds: Vec<NewsFeedConfig>,
+        #[builder(default)] nbu_metrics: NbuMetricsConfig,
+        #[builder(default)] http_sites: Vec<HttpSiteConfig>,
+        #[builder(default)] news_feeds: Vec<NewsFeedConfig>,
     ) -> AgentResult<Self> {
+        if nbu_metrics.enabled && !is_http_url(&nbu_metrics.url) {
+            return Err(AgentError::Config(format!(
+                "URL API НБУ повинен починатися з http:// або https://: `{}`",
+                nbu_metrics.url
+            )));
+        }
+
         {
-            let mut seen_site_ids = HashSet::new();
+            let mut seen_site_ids = HashSet::with_capacity(http_sites.len());
             for site in &http_sites {
-                if site.id.trim().is_empty() || site.url.trim().is_empty() {
+                if site.id.trim().is_empty() || !is_http_url(&site.url) {
                     return Err(AgentError::Config(
-                        "HTTP-сайт повинен мати непорожні id та url".to_string(),
+                        "HTTP-сайт повинен мати непорожній id та коректний http(s):// url"
+                            .to_string(),
                     ));
                 }
                 if !seen_site_ids.insert(site.id.as_str()) {
                     return Err(AgentError::Config(format!(
-                        "Дубльований ідентифікатор HTTP-сайту: `{}`",
+                        "дубльований ідентифікатор HTTP-сайту: `{}`",
                         site.id
                     )));
                 }
@@ -377,16 +449,17 @@ impl AppConfig {
         }
 
         {
-            let mut seen_feed_ids = HashSet::new();
+            let mut seen_feed_ids = HashSet::with_capacity(news_feeds.len());
             for feed in &news_feeds {
-                if feed.id.trim().is_empty() || feed.url.trim().is_empty() {
+                if feed.id.trim().is_empty() || !is_http_url(&feed.url) {
                     return Err(AgentError::Config(
-                        "Стрічка новин повинна мати непорожні id та url".to_string(),
+                        "стрічка новин повинна мати непорожній id та коректний http(s):// url"
+                            .to_string(),
                     ));
                 }
                 if !seen_feed_ids.insert(feed.id.as_str()) {
                     return Err(AgentError::Config(format!(
-                        "Дубльований ідентифікатор стрічки новин: `{}`",
+                        "дубльований ідентифікатор стрічки новин: `{}`",
                         feed.id
                     )));
                 }
@@ -403,6 +476,11 @@ impl AppConfig {
         })
     }
 
+    /// Завантажує та валідує конфігурацію з TOML-файлу.
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`AgentError::Io`] або [`AgentError::TomlDe`] при помилці читання чи розбору.
     pub fn load_from_file(path: impl AsRef<Path>) -> AgentResult<Self> {
         let raw_toml = std::fs::read_to_string(path)?;
         let config: AppConfig = toml::from_str(&raw_toml)?;
@@ -428,13 +506,13 @@ mod tests {
                 && poll_interval_secs > 0
                 && request_timeout_secs > 0
                 && max_concurrent_requests > 0;
-            let res = ServerConfig::new(
-                bind_addr,
-                poll_interval_secs,
-                request_timeout_secs,
-                max_concurrent_requests,
-                RetryPolicy::default(),
-            );
+            let res = ServerConfig::builder()
+                .bind_addr(bind_addr)
+                .poll_interval_secs(poll_interval_secs)
+                .request_timeout_secs(request_timeout_secs)
+                .max_concurrent_requests(max_concurrent_requests)
+                .retry_policy(RetryPolicy::default())
+                .build();
             prop_assert_eq!(res.is_ok(), expected_ok);
         }
 
@@ -445,12 +523,12 @@ mod tests {
             max_files: usize,
         ) {
             let expected_ok = !dir.is_empty() && !file_prefix.trim().is_empty() && max_files > 0;
-            let res = LoggingConfig::new(
-                PathBuf::from(dir),
-                file_prefix,
-                LogRotation::Daily,
-                max_files,
-            );
+            let res = LoggingConfig::builder()
+                .dir(PathBuf::from(dir))
+                .file_prefix(file_prefix)
+                .rotation(LogRotation::Daily)
+                .max_files(max_files)
+                .build();
             prop_assert_eq!(res.is_ok(), expected_ok);
         }
 
@@ -498,17 +576,23 @@ mod tests {
                 })
                 .collect();
 
-            let res = AppConfig::new(
-                ServerConfig::new("127.0.0.1:0".into(), 60, 5, 4, RetryPolicy::default()).unwrap(),
-                LoggingConfig::default(),
-                DssConfig {
+            let res = AppConfig::builder()
+                .server(
+                    ServerConfig::builder()
+                        .bind_addr("127.0.0.1:0")
+                        .poll_interval_secs(60)
+                        .request_timeout_secs(5)
+                        .max_concurrent_requests(4)
+                        .build()
+                        .unwrap(),
+                )
+                .dss(DssConfig {
                     rules_path: PathBuf::from("rules.toml"),
                     state_path: PathBuf::from("state.json"),
-                },
-                NbuMetricsConfig::default(),
-                sites,
-                feeds,
-            );
+                })
+                .http_sites(sites)
+                .news_feeds(feeds)
+                .build();
 
             prop_assert_eq!(res.is_ok(), sites_valid && feeds_valid);
         }

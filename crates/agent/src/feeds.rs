@@ -1,3 +1,7 @@
+//! Завантаження, парсинг, сканування CVE та ранжування новинних RSS/Atom стрічок.
+
+use std::cmp::Ordering;
+
 use feed_rs::parser;
 use hashbrown::HashSet;
 use reqwest::Client;
@@ -15,8 +19,15 @@ use crate::config::{
     KeywordCriterion,
     NewsFeedConfig,
 };
-use crate::error::AgentResult;
+use crate::error::{
+    AgentError,
+    AgentResult,
+};
 
+/// Максимальний розмір тіла RSS/Atom стрічки (10 МБ).
+pub const MAX_FEED_BYTES: usize = 10 * 1024 * 1024;
+
+/// Спрацьоване ключове слово та його внесок у рейтинг релевантності статті.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MatchedKeyword {
     pub word: String,
@@ -26,6 +37,7 @@ pub struct MatchedKeyword {
     pub contribution: f64,
 }
 
+/// Відфільтрована та проранжована новина зі стрічки.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NewsArticle {
     pub id: String,
@@ -43,6 +55,24 @@ pub struct NewsArticle {
     pub fetched_at: OffsetDateTime,
 }
 
+impl NewsArticle {
+    /// Порядок сортування статей за спаданням релевантності, кількості збігів і назвою.
+    #[must_use]
+    pub fn cmp_relevance(&self, other: &Self) -> Ordering {
+        other
+            .relevance_score
+            .total_cmp(&self.relevance_score)
+            .then_with(|| {
+                other
+                    .matched_keywords
+                    .len()
+                    .cmp(&self.matched_keywords.len())
+            })
+            .then_with(|| self.title.cmp(&other.title))
+    }
+}
+
+/// Проміжний запис RSS/Atom після перетворення HTML у чистий текст.
 #[derive(Debug, Clone)]
 pub struct RawFeedItem {
     pub title: String,
@@ -51,15 +81,61 @@ pub struct RawFeedItem {
     pub summary: String,
 }
 
+/// Завантажує стрічку новин, перевіряє HTTP-статус і ліміт розміру,
+/// після чого виконує парсинг і ранжування у `spawn_blocking`.
+///
+/// # Errors
+///
+/// Повертає [`AgentError::Http`], [`AgentError::ResponseTooLarge`],
+/// [`AgentError::FeedParse`] або [`AgentError::TaskJoin`].
+#[tracing::instrument(skip(client, feed), fields(feed_id = %feed.id))]
 pub async fn fetch_and_rank_feed(
     client: &Client,
     feed: &NewsFeedConfig,
 ) -> AgentResult<Vec<NewsArticle>> {
-    let bytes = client.get(&feed.url).send().await?.bytes().await?;
-    let raw_items = parse_feed_bytes(&bytes)?;
-    Ok(filter_and_rank_items(feed, raw_items))
+    let resp = client.get(&feed.url).send().await?.error_for_status()?;
+    let bytes = read_bounded_bytes(resp, MAX_FEED_BYTES).await?;
+    let feed_cfg = feed.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let raw_items = parse_feed_bytes(&bytes)?;
+        Ok(filter_and_rank_items(&feed_cfg, raw_items))
+    })
+    .await?
 }
 
+/// Зчитує тіло HTTP-відповіді у вектор байтів із жорстким обмеженням `limit_bytes`.
+pub(crate) async fn read_bounded_bytes(
+    mut resp: reqwest::Response,
+    limit_bytes: usize,
+) -> AgentResult<Vec<u8>> {
+    if let Some(declared) = resp.content_length()
+        && declared > limit_bytes as u64
+    {
+        return Err(AgentError::ResponseTooLarge { limit_bytes });
+    }
+
+    let initial_cap = resp
+        .content_length()
+        .and_then(|n| usize::try_from(n).ok())
+        .map_or(0, |n| n.min(limit_bytes));
+    let mut buf = Vec::with_capacity(initial_cap);
+
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len().saturating_add(chunk.len()) > limit_bytes {
+            return Err(AgentError::ResponseTooLarge { limit_bytes });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+
+    Ok(buf)
+}
+
+/// Розбирає байти RSS/Atom стрічки у список очищених [`RawFeedItem`].
+///
+/// # Errors
+///
+/// Повертає [`AgentError::FeedParse`], якщо вхідні байти не є коректним RSS/Atom документом.
 pub fn parse_feed_bytes(bytes: &[u8]) -> AgentResult<Vec<RawFeedItem>> {
     let parsed = parser::parse(bytes)?;
     let mut items = Vec::with_capacity(parsed.entries.len());
@@ -67,18 +143,12 @@ pub fn parse_feed_bytes(bytes: &[u8]) -> AgentResult<Vec<RawFeedItem>> {
     for entry in parsed.entries {
         let title = entry
             .title
-            .map(|t| html_to_plain_text(&t.content))
-            .unwrap_or_default();
+            .map_or_default(|t| html_to_plain_text(&t.content));
         if title.is_empty() {
             continue;
         }
 
-        let link = entry
-            .links
-            .into_iter()
-            .next()
-            .map(|l| l.href)
-            .unwrap_or_default();
+        let link = entry.links.into_iter().next().map_or_default(|l| l.href);
 
         let published = entry.published.or(entry.updated).map(|dt| dt.to_string());
 
@@ -100,26 +170,32 @@ pub fn parse_feed_bytes(bytes: &[u8]) -> AgentResult<Vec<RawFeedItem>> {
     Ok(items)
 }
 
+/// Фільтрує та ранжує елементи стрічки за вагою ключових слів, різноманітністю та наявністю CVE.
+#[must_use]
 pub fn filter_and_rank_items(
     feed: &NewsFeedConfig,
     raw_items: Vec<RawFeedItem>,
 ) -> Vec<NewsArticle> {
     let now = OffsetDateTime::now_utc();
-    let mut ranked = Vec::new();
+    let prepared_keywords: Vec<(&KeywordCriterion, String)> = feed
+        .keywords
+        .iter()
+        .map(|kw| (kw, kw.word.to_lowercase()))
+        .collect();
+    let mut ranked = Vec::with_capacity(raw_items.len());
 
     for item in raw_items {
         let title_lower = item.title.to_lowercase();
         let summary_lower = item.summary.to_lowercase();
 
         let (matched_keywords, base_score) =
-            score_keywords(&feed.keywords, &title_lower, &summary_lower);
+            score_keywords(&prepared_keywords, &title_lower, &summary_lower);
 
         if !feed.keywords.is_empty() && matched_keywords.is_empty() {
             continue;
         }
 
-        let combined_text = format!("{} {}", item.title, item.summary);
-        let cves = extract_cves(&combined_text);
+        let cves = extract_cves_from_parts(&[item.title.as_str(), item.summary.as_str()]);
         let diversity_bonus = if matched_keywords.len() > 1 {
             (matched_keywords.len() as f64 - 1.0) * 0.75
         } else {
@@ -145,28 +221,22 @@ pub fn filter_and_rank_items(
         });
     }
 
-    ranked.sort_by(|a, b| {
-        b.relevance_score
-            .total_cmp(&a.relevance_score)
-            .then_with(|| b.matched_keywords.len().cmp(&a.matched_keywords.len()))
-            .then_with(|| a.title.cmp(&b.title))
-    });
+    ranked.sort_by(NewsArticle::cmp_relevance);
 
     ranked
 }
 
 fn score_keywords(
-    keywords: &[KeywordCriterion],
+    keywords: &[(&KeywordCriterion, String)],
     title_lower: &str,
     summary_lower: &str,
 ) -> (Vec<MatchedKeyword>, f64) {
     let mut matched = Vec::new();
     let mut total = 0.0;
 
-    for kw in keywords {
-        let needle = kw.word.to_lowercase();
-        let in_title = title_lower.contains(&needle);
-        let in_body = summary_lower.contains(&needle);
+    for (kw, needle) in keywords {
+        let in_title = title_lower.contains(needle.as_str());
+        let in_body = summary_lower.contains(needle.as_str());
         if in_title || in_body {
             let mut contribution = 0.0;
             if in_title {
@@ -191,16 +261,25 @@ fn score_keywords(
 
 /// Детермінований сканер ідентифікаторів `CVE-YYYY-NNNN` (4–7 цифр у другій частині)
 /// без використання регулярних виразів.
+#[must_use]
 pub fn extract_cves(text: &str) -> Vec<String> {
+    extract_cves_from_parts(&[text])
+}
+
+/// Сканує декілька текстових фрагментів на унікальні `CVE-YYYY-NNNN` без конкатенації рядків.
+#[must_use]
+pub fn extract_cves_from_parts(parts: &[&str]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
 
-    for token in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
-        let trimmed = token.trim_matches('-');
-        if let Some(cve) = parse_cve_token(trimmed)
-            && seen.insert(cve.clone())
-        {
-            out.push(cve);
+    for text in parts {
+        for token in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+            let trimmed = token.trim_matches('-');
+            if let Some(cve) = parse_cve_token(trimmed)
+                && seen.insert(cve.clone())
+            {
+                out.push(cve);
+            }
         }
     }
 
@@ -242,7 +321,14 @@ fn article_id(feed_id: &str, link: &str, title: &str) -> String {
 fn html_to_plain_text(input: &str) -> String {
     let rendered = html2text::from_read(input.as_bytes(), 1000)
         .unwrap_or_else(|_| html_escape::decode_html_entities(input).into_owned());
-    rendered.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(rendered.len());
+    for (idx, word) in rendered.split_whitespace().enumerate() {
+        if idx > 0 {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -277,8 +363,8 @@ mod tests {
             year in 1999_u32..=2099,
             seq_digits in "[0-9]{4,7}",
             prefix_case in prop_oneof![Just("CVE"), Just("cve"), Just("CvE"), Just("cVe")],
-            left_sep in "[ ,.;:()\\[\\]\\n]{1,4}",
-            right_sep in "[ ,.;:()\\[\\]\\n]{1,4}",
+            left_sep in "[ ,.;:()\\[\\]\n]{1,4}",
+            right_sep in "[ ,.;:()\\[\\]\n]{1,4}",
         ) {
             let raw_cve = format!("{prefix_case}-{year}-{seq_digits}");
             let expected = format!("CVE-{year}-{seq_digits}");
@@ -318,8 +404,8 @@ mod tests {
                 group: "cybersecurity".into(),
                 url: "http://mock.local/rss".into(),
                 keywords: vec![
-                    KeywordCriterion::new("sentinel".into(), weight).unwrap(),
-                    KeywordCriterion::new("rustlang".into(), 1.5).unwrap(),
+                    KeywordCriterion::new("sentinel", weight).unwrap(),
+                    KeywordCriterion::new("rustlang", 1.5).unwrap(),
                 ],
             };
 
@@ -374,12 +460,7 @@ mod tests {
             // Порядок сортування відповідає інваріанту
             for pair in ranked.windows(2) {
                 let (a, b) = (&pair[0], &pair[1]);
-                let ord = b
-                    .relevance_score
-                    .total_cmp(&a.relevance_score)
-                    .then_with(|| b.matched_keywords.len().cmp(&a.matched_keywords.len()))
-                    .then_with(|| a.title.cmp(&b.title));
-                prop_assert!(ord != std::cmp::Ordering::Greater);
+                prop_assert!(a.cmp_relevance(b) != Ordering::Greater);
             }
 
             let score_of = |link: &str| {

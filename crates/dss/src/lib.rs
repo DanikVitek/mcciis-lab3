@@ -1,9 +1,15 @@
+//! Продукційне ядро інтелектуальної системи підтримки прийняття рішень (ІСППР)
+//! із прямим логічним виводом (Forward Chaining) та комбінуванням коефіцієнтів
+//! впевненості за моделлю MYCIN.
+
 pub mod error;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
+use bon::bon;
 use hashbrown::HashSet;
 use serde::{
     Deserialize,
@@ -16,40 +22,97 @@ use crate::error::{
     DssResult,
 };
 
+const FLOAT_EQ_EPSILON: f64 = 1e-9;
+
+/// Нормалізує коефіцієнт впевненості у діапазон `[0.0, 1.0]`, захищаючи від `NaN` і нескінченностей.
+#[inline]
+#[must_use]
+fn normalize_cf(cf: f64) -> f64 {
+    if cf.is_finite() {
+        cf.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Типізоване значення факту в робочій пам'яті ІСППР.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum FactValue {
+    /// Логічне значення.
     Bool(bool),
+    /// Числове значення з плаваючою комою.
     Number(f64),
+    /// Довільне текстове значення.
     Text(String),
 }
 
 impl FactValue {
+    /// Повертає запозичений зріз рядка без алокацій, якщо факт має варіант [`Self::Text`].
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Text(s) => Some(s.as_str()),
+            Self::Bool(_) | Self::Number(_) => None,
+        }
+    }
+
+    /// Повертає числове подання факту, якщо значення є скінченним числом або парситься як `f64`.
+    #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
         match self {
-            Self::Number(v) => Some(*v),
-            Self::Text(s) => s.trim().parse::<f64>().ok(),
-            Self::Bool(_) => None,
+            Self::Number(v) if v.is_finite() => Some(*v),
+            Self::Number(_) | Self::Bool(_) => None,
+            Self::Text(s) => s.trim().parse::<f64>().ok().filter(|n| n.is_finite()),
         }
     }
 
-    pub fn to_text(&self) -> String {
+    /// Перетворює факт на текстове подання (`Cow<'_, str>`), алокуючи лише для `Number`.
+    #[must_use]
+    pub fn to_text(&self) -> Cow<'_, str> {
         match self {
-            Self::Bool(b) => b.to_string(),
-            Self::Number(n) => {
-                if n.fract().abs() < f64::EPSILON {
-                    format!("{n:.0}")
-                } else {
-                    format!("{n:.4}")
-                        .trim_end_matches('0')
-                        .trim_end_matches('.')
-                        .to_string()
-                }
-            }
-            Self::Text(s) => s.clone(),
+            Self::Bool(true) => Cow::Borrowed("true"),
+            Self::Bool(false) => Cow::Borrowed("false"),
+            Self::Number(n) => Cow::Owned(format_number(*n)),
+            Self::Text(s) => Cow::Borrowed(s.as_str()),
         }
     }
 
+    /// Споживає факт і повертає власний `String`, переміщуючи [`Self::Text`] без копіювання.
+    #[must_use]
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Bool(true) => "true".to_owned(),
+            Self::Bool(false) => "false".to_owned(),
+            Self::Number(n) => format_number(n),
+            Self::Text(s) => s,
+        }
+    }
+
+    /// Порівняння значень фактів із допуском для чисел та без урахування регістру ASCII для тексту.
+    #[must_use]
+    pub fn approx_eq(&self, other: &Self) -> bool {
+        match (self.to_f64(), other.to_f64()) {
+            (Some(a), Some(b)) => (a - b).abs() < FLOAT_EQ_EPSILON,
+            _ => self.to_text().eq_ignore_ascii_case(&other.to_text()),
+        }
+    }
+
+    /// Розбирає введене користувачем значення у `Bool`, скінченний `Number` або `Text`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dss::FactValue;
+    ///
+    /// assert_eq!(FactValue::parse_user_input("true"), FactValue::Bool(true));
+    /// assert_eq!(FactValue::parse_user_input("42,5"), FactValue::Number(42.5));
+    /// assert_eq!(
+    ///     FactValue::parse_user_input("elevated"),
+    ///     FactValue::Text("elevated".into())
+    /// );
+    /// ```
+    #[must_use]
     pub fn parse_user_input(raw: &str) -> Self {
         let trimmed = raw.trim();
         if trimmed.eq_ignore_ascii_case("true") {
@@ -58,7 +121,12 @@ impl FactValue {
         if trimmed.eq_ignore_ascii_case("false") {
             return Self::Bool(false);
         }
-        if let Ok(num) = trimmed.replace(',', ".").parse::<f64>()
+        let parsed = if trimmed.contains(',') {
+            trimmed.replace(',', ".").parse::<f64>()
+        } else {
+            trimmed.parse::<f64>()
+        };
+        if let Ok(num) = parsed
             && num.is_finite()
         {
             return Self::Number(num);
@@ -67,22 +135,60 @@ impl FactValue {
     }
 }
 
-impl fmt::Display for FactValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_text())
+fn format_number(n: f64) -> String {
+    if !n.is_finite() {
+        return n.to_string();
+    }
+    if n.fract().abs() < f64::EPSILON {
+        format!("{n:.0}")
+    } else {
+        let mut s = format!("{n:.4}");
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+        s
     }
 }
 
+impl From<&str> for FactValue {
+    fn from(raw: &str) -> Self {
+        Self::parse_user_input(raw)
+    }
+}
+
+impl fmt::Display for FactValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bool(true) => f.write_str("true"),
+            Self::Bool(false) => f.write_str("false"),
+            Self::Text(s) => f.write_str(s),
+            Self::Number(n) if n.is_finite() && n.fract().abs() < f64::EPSILON => {
+                write!(f, "{n:.0}")
+            }
+            Self::Number(n) => f.write_str(&format_number(*n)),
+        }
+    }
+}
+
+/// Походження факту в робочій пам'яті ІСППР.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactOrigin {
+    /// Зібрано автономним Web-агентом.
     WebAgent,
+    /// Виведено машиною логічного виводу ІСППР.
     Inferred,
+    /// Додано користувачем вручну (what-if симуляція).
     Manual,
 }
 
 impl FactOrigin {
-    pub fn label_uk(self) -> &'static str {
+    /// Повертає локалізовану назву походження факту українською.
+    #[must_use]
+    pub const fn label_uk(self) -> &'static str {
         match self {
             Self::WebAgent => "Web-агент",
             Self::Inferred => "Виведено ІСППР",
@@ -91,6 +197,7 @@ impl FactOrigin {
     }
 }
 
+/// Факт робочої пам'яті ІСППР із джерелом та коефіцієнтом впевненості.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Fact {
     pub key: String,
@@ -103,6 +210,8 @@ pub struct Fact {
 }
 
 impl Fact {
+    /// Створює новий факт із нормалізацією коефіцієнта впевненості у `[0.0, 1.0]`.
+    #[must_use]
     pub fn new(
         key: impl Into<String>,
         value: FactValue,
@@ -114,13 +223,14 @@ impl Fact {
             key: key.into(),
             value,
             source: source.into(),
-            cf: cf.clamp(0.0, 1.0),
+            cf: normalize_cf(cf),
             origin,
             updated_at: OffsetDateTime::now_utc(),
         }
     }
 }
 
+/// Оператор порівняння умови продукційного правила.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Operator {
@@ -134,7 +244,9 @@ pub enum Operator {
 }
 
 impl Operator {
-    pub fn symbol(self) -> &'static str {
+    /// Повертає символьне подання оператора.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
         match self {
             Self::Eq => "==",
             Self::Ne => "!=",
@@ -146,13 +258,12 @@ impl Operator {
         }
     }
 
+    /// Перевіряє, чи задовольняє фактичне значення `actual` умові щодо `expected`.
+    #[must_use]
     pub fn matches(self, actual: &FactValue, expected: &FactValue) -> bool {
         match self {
-            Self::Eq => match (actual.to_f64(), expected.to_f64()) {
-                (Some(a), Some(b)) => (a - b).abs() < 1e-9,
-                _ => actual.to_text().eq_ignore_ascii_case(&expected.to_text()),
-            },
-            Self::Ne => !Self::Eq.matches(actual, expected),
+            Self::Eq => actual.approx_eq(expected),
+            Self::Ne => !actual.approx_eq(expected),
             Self::Gt => matches!(
                 (actual.to_f64(), expected.to_f64()),
                 (Some(a), Some(b)) if a > b
@@ -177,19 +288,24 @@ impl Operator {
     }
 }
 
+/// Окрема умова (антецедент) продукційного правила.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Condition {
     pub fact: String,
     pub op: Operator,
     pub value: FactValue,
 }
 
+/// Специфікація виведеного факту (консеквента) правила.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DerivedFactSpec {
     pub key: String,
     pub value: FactValue,
 }
 
+/// Рівень критичності рішення ІСППР.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -200,7 +316,9 @@ pub enum Severity {
 }
 
 impl Severity {
-    pub fn label_uk(self) -> &'static str {
+    /// Повертає локалізовану назву рівня критичності українською.
+    #[must_use]
+    pub const fn label_uk(self) -> &'static str {
         match self {
             Self::Critical => "Критичний",
             Self::High => "Високий",
@@ -209,7 +327,9 @@ impl Severity {
         }
     }
 
-    pub fn css_class(self) -> &'static str {
+    /// Повертає CSS-клас для відображення рівня критичності в інтерфейсі.
+    #[must_use]
+    pub const fn css_class(self) -> &'static str {
         match self {
             Self::Critical => "sev-critical",
             Self::High => "sev-high",
@@ -219,6 +339,7 @@ impl Severity {
     }
 }
 
+/// Продукційне правило бази знань ІСППР.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "RawRule")]
 pub struct Rule {
@@ -234,6 +355,7 @@ pub struct Rule {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRule {
     id: String,
     name: String,
@@ -252,27 +374,35 @@ impl TryFrom<RawRule> for Rule {
     type Error = DssError;
 
     fn try_from(raw: RawRule) -> Result<Self, Self::Error> {
-        Self::new(
-            raw.id,
-            raw.name,
-            raw.description,
-            raw.priority,
-            raw.severity,
-            raw.cf,
-            raw.conditions,
-            raw.derived_fact,
-            raw.recommendation,
-        )
+        Self::builder()
+            .id(raw.id)
+            .name(raw.name)
+            .description(raw.description)
+            .priority(raw.priority)
+            .severity(raw.severity)
+            .cf(raw.cf)
+            .conditions(raw.conditions)
+            .maybe_derived_fact(raw.derived_fact)
+            .recommendation(raw.recommendation)
+            .build()
     }
 }
 
+#[bon]
 impl Rule {
+    /// Створює та валідує продукційне правило через типобезпечний builder (`bon`).
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`DssError::InvalidRule`], якщо `id` порожній, список умов порожній
+    /// або `cf` не є скінченним числом у межах `[0.0, 1.0]`.
+    #[builder(derive(Debug), on(String, into))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         name: String,
-        description: String,
-        priority: i32,
+        #[builder(default)] description: String,
+        #[builder(default)] priority: i32,
         severity: Severity,
         cf: f64,
         conditions: Vec<Condition>,
@@ -281,17 +411,17 @@ impl Rule {
     ) -> DssResult<Self> {
         if id.trim().is_empty() {
             return Err(DssError::InvalidRule(
-                "Ідентифікатор правила не може бути порожнім".to_string(),
+                "ідентифікатор правила не може бути порожнім".to_string(),
             ));
         }
         if conditions.is_empty() {
             return Err(DssError::InvalidRule(format!(
-                "Правило `{id}` повинно містити хоча б одну умову"
+                "правило `{id}` повинно містити хоча б одну умову"
             )));
         }
         if !cf.is_finite() || !(0.0..=1.0).contains(&cf) {
             return Err(DssError::InvalidRule(format!(
-                "Коефіцієнт впевненості CF правила `{id}` має бути в межах [0.0; 1.0]"
+                "коефіцієнт впевненості CF правила `{id}` має бути в межах [0.0; 1.0]"
             )));
         }
         Ok(Self {
@@ -308,6 +438,7 @@ impl Rule {
     }
 }
 
+/// База знань ІСППР із гарантованою унікальністю ідентифікаторів правил.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(try_from = "RawKnowledgeBase")]
 pub struct KnowledgeBase {
@@ -315,6 +446,7 @@ pub struct KnowledgeBase {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawKnowledgeBase {
     rules: Vec<Rule>,
 }
@@ -328,13 +460,18 @@ impl TryFrom<RawKnowledgeBase> for KnowledgeBase {
 }
 
 impl KnowledgeBase {
+    /// Створює базу знань, перевіряючи відсутність дубльованих ідентифікаторів правил.
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`DssError::InvalidRule`], якщо серед правил є дубльовані `id`.
     pub fn new(rules: Vec<Rule>) -> DssResult<Self> {
         {
-            let mut ids = HashSet::new();
+            let mut ids = HashSet::with_capacity(rules.len());
             for rule in &rules {
                 if !ids.insert(rule.id.as_str()) {
                     return Err(DssError::InvalidRule(format!(
-                        "Дубльований ідентифікатор правила БЗ: `{}`",
+                        "дубльований ідентифікатор правила БЗ: `{}`",
                         rule.id
                     )));
                 }
@@ -343,6 +480,12 @@ impl KnowledgeBase {
         Ok(Self { rules })
     }
 
+    /// Завантажує та валідує базу знань із TOML-файлу на диску.
+    ///
+    /// # Errors
+    ///
+    /// Повертає [`DssError::Io`] при помилці читання файлу або [`DssError::TomlDe`]
+    /// при помилці синтаксису чи валідації правил.
     pub fn load_from_file(path: impl AsRef<Path>) -> DssResult<Self> {
         let raw = std::fs::read_to_string(path)?;
         let kb: KnowledgeBase = toml::from_str(&raw)?;
@@ -350,6 +493,7 @@ impl KnowledgeBase {
     }
 }
 
+/// Трасування окремої спрацьованої умови правила (підсистема пояснення ІСППР).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConditionTrace {
     pub fact_key: String,
@@ -360,6 +504,7 @@ pub struct ConditionTrace {
     pub fact_cf: f64,
 }
 
+/// Рішення ІСППР, сформоване внаслідок спрацювання продукційного правила.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Decision {
     pub rule_id: String,
@@ -372,6 +517,7 @@ pub struct Decision {
     pub explanation: Vec<ConditionTrace>,
 }
 
+/// Результат повного циклу логічного виводу ІСППР.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct InferenceResult {
     pub decisions: Vec<Decision>,
@@ -380,37 +526,62 @@ pub struct InferenceResult {
     pub iterations: usize,
 }
 
+/// Машина прямого логічного виводу (Forward Chaining + MYCIN CF).
 #[derive(Debug, Clone)]
 pub struct InferenceEngine {
     kb: KnowledgeBase,
+    ordered_indices: Vec<usize>,
 }
 
 impl InferenceEngine {
+    /// Ініціалізує машину виводу та попередньо впорядковує індекси правил за пріоритетом.
+    #[must_use]
     pub fn new(kb: KnowledgeBase) -> Self {
-        Self { kb }
+        let mut ordered_indices: Vec<usize> = (0..kb.rules.len()).collect();
+        ordered_indices.sort_by(|&a, &b| {
+            let ra = &kb.rules[a];
+            let rb = &kb.rules[b];
+            rb.priority
+                .cmp(&ra.priority)
+                .then_with(|| ra.id.cmp(&rb.id))
+        });
+        Self {
+            kb,
+            ordered_indices,
+        }
     }
 
+    /// Повертає зріз правил активної бази знань.
+    #[must_use]
     pub fn rules(&self) -> &[Rule] {
         &self.kb.rules
     }
 
     /// Комбінування коефіцієнтів впевненості за моделлю MYCIN (Шортліфф):
     /// `CF_comb = CF1 + CF2 * (1 - CF1)` для позитивних свідчень у `[0, 1]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dss::InferenceEngine;
+    ///
+    /// let combined = InferenceEngine::combine_cf(0.8, 0.8);
+    /// assert!((combined - 0.96).abs() < 1e-12);
+    /// ```
+    #[must_use]
     pub fn combine_cf(cf1: f64, cf2: f64) -> f64 {
-        let a = cf1.clamp(0.0, 1.0);
-        let b = cf2.clamp(0.0, 1.0);
-        (a + b * (1.0 - a)).clamp(0.0, 1.0)
+        let a = normalize_cf(cf1);
+        let b = normalize_cf(cf2);
+        normalize_cf(a + b * (1.0 - a))
     }
 
     /// Прямий логічний вивід (Forward Chaining) до досягнення нерухомої точки.
+    #[must_use]
     pub fn evaluate(&self, base_facts: &BTreeMap<String, Fact>) -> InferenceResult {
         let mut working_memory = base_facts.clone();
         let mut inferred_facts: BTreeMap<String, Fact> = BTreeMap::new();
-        let mut decisions_by_rule: BTreeMap<String, Decision> = BTreeMap::new();
-        let mut fired_rules: HashSet<String> = HashSet::new();
-
-        let mut ordered_rules: Vec<&Rule> = self.kb.rules.iter().collect();
-        ordered_rules.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.id.cmp(&b.id)));
+        let mut decisions: Vec<Decision> = Vec::new();
+        let mut fired_rules: HashSet<&str> = HashSet::with_capacity(self.kb.rules.len());
 
         let max_iterations = self.kb.rules.len().saturating_add(2);
         let mut iterations = 0;
@@ -419,25 +590,26 @@ impl InferenceEngine {
             iterations += 1;
             let mut changed = false;
 
-            for rule in &ordered_rules {
-                if fired_rules.contains(&rule.id) {
+            for &idx in &self.ordered_indices {
+                let rule = &self.kb.rules[idx];
+                if fired_rules.contains(rule.id.as_str()) {
                     continue;
                 }
 
                 if let Some((min_cond_cf, traces)) = check_conditions(rule, &working_memory) {
-                    let decision_cf = (min_cond_cf * rule.cf).clamp(0.0, 1.0);
-                    fired_rules.insert(rule.id.clone());
+                    let decision_cf = normalize_cf(min_cond_cf * rule.cf);
+                    fired_rules.insert(rule.id.as_str());
                     changed = true;
 
                     if let Some(derived) = &rule.derived_fact {
-                        let source_label = format!("Правило {}", rule.id);
                         match working_memory.get_mut(&derived.key) {
                             Some(existing)
                                 if existing.origin == FactOrigin::Inferred
-                                    && existing.value == derived.value =>
+                                    && existing.value.approx_eq(&derived.value) =>
                             {
                                 existing.cf = Self::combine_cf(existing.cf, decision_cf);
-                                existing.source = format!("{}, {}", existing.source, rule.id);
+                                existing.source.push_str(", ");
+                                existing.source.push_str(&rule.id);
                                 existing.updated_at = OffsetDateTime::now_utc();
                                 inferred_facts.insert(derived.key.clone(), existing.clone());
                             }
@@ -448,7 +620,7 @@ impl InferenceEngine {
                                 let updated = Fact::new(
                                     derived.key.clone(),
                                     derived.value.clone(),
-                                    source_label,
+                                    format!("Правило {}", rule.id),
                                     decision_cf,
                                     FactOrigin::Inferred,
                                 );
@@ -459,7 +631,7 @@ impl InferenceEngine {
                                 let new_fact = Fact::new(
                                     derived.key.clone(),
                                     derived.value.clone(),
-                                    source_label,
+                                    format!("Правило {}", rule.id),
                                     decision_cf,
                                     FactOrigin::Inferred,
                                 );
@@ -470,19 +642,16 @@ impl InferenceEngine {
                         }
                     }
 
-                    decisions_by_rule.insert(
-                        rule.id.clone(),
-                        Decision {
-                            rule_id: rule.id.clone(),
-                            rule_name: rule.name.clone(),
-                            priority: rule.priority,
-                            severity: rule.severity,
-                            cf: decision_cf,
-                            recommendation: rule.recommendation.clone(),
-                            derived_fact: rule.derived_fact.clone(),
-                            explanation: traces,
-                        },
-                    );
+                    decisions.push(Decision {
+                        rule_id: rule.id.clone(),
+                        rule_name: rule.name.clone(),
+                        priority: rule.priority,
+                        severity: rule.severity,
+                        cf: decision_cf,
+                        recommendation: rule.recommendation.clone(),
+                        derived_fact: rule.derived_fact.clone(),
+                        explanation: traces,
+                    });
                 }
             }
 
@@ -491,7 +660,6 @@ impl InferenceEngine {
             }
         }
 
-        let mut decisions: Vec<Decision> = decisions_by_rule.into_values().collect();
         decisions.sort_by(|a, b| {
             b.severity
                 .cmp(&a.severity)
@@ -523,7 +691,7 @@ fn check_conditions(
         if !cond.op.matches(&fact.value, &cond.value) {
             return None;
         }
-        min_cf = min_cf.min(fact.cf);
+        min_cf = min_cf.min(normalize_cf(fact.cf));
         traces.push(ConditionTrace {
             fact_key: cond.fact.clone(),
             operator: cond.op,
@@ -558,6 +726,19 @@ mod tests {
             Just(Severity::High),
             Just(Severity::Critical),
         ]
+    }
+
+    #[test]
+    fn non_finite_cf_is_normalized_to_zero() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let fact = Fact::new("k", FactValue::Bool(true), "src", bad, FactOrigin::Manual);
+            assert!(fact.cf.is_finite());
+            assert!((0.0..=1.0).contains(&fact.cf));
+
+            let combined = InferenceEngine::combine_cf(bad, 0.5);
+            assert!(combined.is_finite());
+            assert!((combined - 0.5).abs() < 1e-12);
+        }
     }
 
     proptest! {
@@ -641,7 +822,7 @@ mod tests {
             pad_left in "[ \t]{0,3}",
             pad_right in "[ \t]{0,3}",
         ) {
-            let value = num as f64 + (frac as f64 / 10_000.0) * if num < 0 { -1.0 } else { 1.0 };
+            let value = f64::from(num) + (f64::from(frac) / 10_000.0) * if num < 0 { -1.0 } else { 1.0 };
             let formatted = if use_comma {
                 format!("{pad_left}{value:.4}{pad_right}").replace('.', ",")
             } else {
@@ -663,23 +844,19 @@ mod tests {
         }
 
         #[test]
-        fn rule_new_enforces_cf_bounds(cf in -5.0_f64..5.0_f64) {
-            let cond = vec![Condition {
-                fact: "x".into(),
-                op: Operator::Eq,
-                value: FactValue::Bool(true),
-            }];
-            let res = Rule::new(
-                "R1".into(),
-                "Rule".into(),
-                String::new(),
-                0,
-                Severity::Info,
-                cf,
-                cond,
-                None,
-                "Rec".into(),
-            );
+        fn rule_builder_enforces_cf_bounds(cf in -5.0_f64..5.0_f64) {
+            let res = Rule::builder()
+                .id("R1")
+                .name("Rule")
+                .severity(Severity::Info)
+                .cf(cf)
+                .conditions(vec![Condition {
+                    fact: "x".into(),
+                    op: Operator::Eq,
+                    value: FactValue::Bool(true),
+                }])
+                .recommendation("Rec")
+                .build();
             prop_assert_eq!(res.is_ok(), (0.0..=1.0).contains(&cf));
         }
 
@@ -693,25 +870,24 @@ mod tests {
         ) {
             let mut rules = Vec::with_capacity(chain_len);
             for i in 0..chain_len {
-                let rule = Rule::new(
-                    format!("R_{i:02}"),
-                    format!("Step {i}"),
-                    String::new(),
-                    priorities[i],
-                    severities[i],
-                    rule_cfs[i],
-                    vec![Condition {
+                let rule = Rule::builder()
+                    .id(format!("R_{i:02}"))
+                    .name(format!("Step {i}"))
+                    .priority(priorities[i])
+                    .severity(severities[i])
+                    .cf(rule_cfs[i])
+                    .conditions(vec![Condition {
                         fact: format!("step_{i}"),
                         op: Operator::Eq,
                         value: FactValue::Bool(true),
-                    }],
-                    Some(DerivedFactSpec {
+                    }])
+                    .derived_fact(DerivedFactSpec {
                         key: format!("step_{}", i + 1),
                         value: FactValue::Bool(true),
-                    }),
-                    format!("Action {i}"),
-                )
-                .unwrap();
+                    })
+                    .recommendation(format!("Action {i}"))
+                    .build()
+                    .unwrap();
                 rules.push(rule);
             }
 
@@ -763,25 +939,24 @@ mod tests {
             cf2 in 0.1_f64..=1.0_f64,
         ) {
             let make_rule = |id: &str, cf: f64| {
-                Rule::new(
-                    id.into(),
-                    id.into(),
-                    String::new(),
-                    10,
-                    Severity::High,
-                    cf,
-                    vec![Condition {
+                Rule::builder()
+                    .id(id)
+                    .name(id)
+                    .priority(10)
+                    .severity(Severity::High)
+                    .cf(cf)
+                    .conditions(vec![Condition {
                         fact: "signal".into(),
                         op: Operator::Eq,
                         value: FactValue::Bool(true),
-                    }],
-                    Some(DerivedFactSpec {
+                    }])
+                    .derived_fact(DerivedFactSpec {
                         key: "risk".into(),
                         value: FactValue::Text("elevated".into()),
-                    }),
-                    "Act".into(),
-                )
-                .unwrap()
+                    })
+                    .recommendation("Act")
+                    .build()
+                    .unwrap()
             };
 
             let kb = KnowledgeBase::new(vec![make_rule("R1", cf1), make_rule("R2", cf2)]).unwrap();

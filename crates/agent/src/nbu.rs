@@ -1,3 +1,5 @@
+//! Завантаження та обробка офіційних валютних курсів API НБУ.
+
 use hashbrown::{
     HashMap,
     HashSet,
@@ -10,6 +12,10 @@ use serde::{
 
 use crate::config::NbuMetricsConfig;
 use crate::error::AgentResult;
+use crate::feeds::read_bounded_bytes;
+
+/// Максимальний розмір JSON-відповіді API НБУ (5 МБ).
+pub const MAX_NBU_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 struct RawNbuEntry {
@@ -19,6 +25,7 @@ struct RawNbuEntry {
     exchangedate: String,
 }
 
+/// Офіційний курс валюти НБУ з обчисленою зміною відносно попереднього циклу.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CurrencyRate {
     pub cc: String,
@@ -29,6 +36,13 @@ pub struct CurrencyRate {
     pub exchangedate: String,
 }
 
+/// Завантажує курси валют з API НБУ, перевіряє HTTP-статус і ліміт розміру тіла.
+///
+/// # Errors
+///
+/// Повертає [`crate::error::AgentError::Http`], [`crate::error::AgentError::ResponseTooLarge`]
+/// або [`crate::error::AgentError::Json`].
+#[tracing::instrument(skip(client, cfg, previous))]
 pub async fn fetch_nbu_rates(
     client: &Client,
     cfg: &NbuMetricsConfig,
@@ -38,7 +52,9 @@ pub async fn fetch_nbu_rates(
         return Ok(Vec::new());
     }
 
-    let raw_entries: Vec<RawNbuEntry> = client.get(&cfg.url).send().await?.json().await?;
+    let resp = client.get(&cfg.url).send().await?.error_for_status()?;
+    let bytes = read_bounded_bytes(resp, MAX_NBU_BYTES).await?;
+    let raw_entries: Vec<RawNbuEntry> = serde_json::from_slice(&bytes)?;
     Ok(extract_configured_rates(raw_entries, cfg, previous))
 }
 
@@ -51,7 +67,7 @@ fn extract_configured_rates(
 
     let prev_map: HashMap<&str, f64> = previous.iter().map(|c| (c.cc.as_str(), c.rate)).collect();
 
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(wanted.len());
     for entry in raw_entries {
         let code = entry.cc.to_uppercase();
         if !wanted.is_empty() && !wanted.contains(&code) {
@@ -87,6 +103,11 @@ fn extract_configured_rates(
     out
 }
 
+/// Розбирає JSON-рядок відповіді API НБУ та обчислює відсоткові зміни курсів.
+///
+/// # Errors
+///
+/// Повертає [`crate::error::AgentError::Json`] при некоректному JSON.
 pub fn parse_nbu_json(
     json_str: &str,
     cfg: &NbuMetricsConfig,
