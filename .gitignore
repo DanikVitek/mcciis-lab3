@@ -1,4 +1,8 @@
 /target
 /data/state.json
 /logs
-skills/system/run-workflow/
+/frontend/node_modules
+/frontend/.svelte-kit
+/frontend/build
+/frontend/dist
+skills/system

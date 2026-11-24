@@ -1,0 +1,171 @@
+[config]
+default_to_workspace = false
+skip_core_tasks = true
+
+[env]
+API_URL = "http://127.0.0.1:8080"
+FRONTEND_HOST = "127.0.0.1"
+FRONTEND_PORT = "5173"
+FRONTEND_DIR = "frontend/build"
+
+[env.development]
+DEV_FRONTEND_URL = "http://${FRONTEND_HOST}:${FRONTEND_PORT}"
+
+[env.production]
+DEV_FRONTEND_URL = { unset = true }
+
+[tasks.default]
+description = "Default task (alias for dev)"
+category = "Development"
+alias = "dev"
+
+# ---------------------------------------------------------------------------
+# Frontend (SvelteKit 3 + Svelte 5 + Vite 8 + @sveltejs/adapter-static)
+# ---------------------------------------------------------------------------
+
+[tasks.frontend-install]
+description = "Install frontend dependencies with pnpm"
+category = "Frontend"
+command = "pnpm"
+args = ["--dir", "frontend", "install"]
+
+[tasks.frontend-ensure]
+description = "Install frontend dependencies only when frontend/node_modules is missing"
+private = true
+condition = { files_not_exist = ["${CARGO_MAKE_WORKING_DIRECTORY}/frontend/node_modules"] }
+command = "pnpm"
+args = ["--dir", "frontend", "install"]
+
+[tasks.frontend-check]
+description = "Run SvelteKit sync and sv check (strict TypeScript + Zod Mini)"
+category = "Frontend"
+dependencies = ["frontend-ensure"]
+command = "pnpm"
+args = ["--dir", "frontend", "run", "check"]
+
+[tasks.frontend-build]
+description = "Build static SvelteKit SPA into frontend/build/"
+category = "Frontend"
+dependencies = ["frontend-ensure"]
+command = "pnpm"
+args = ["--dir", "frontend", "run", "build"]
+
+# ---------------------------------------------------------------------------
+# Backend (Rust workspace + Axum HTTP server)
+# ---------------------------------------------------------------------------
+
+[tasks.backend-build-dev]
+description = "Compile web-agent-server (debug profile)"
+category = "Backend"
+install_crate = false
+command = "cargo"
+args = ["build", "--bin", "web-agent-server"]
+
+[tasks.backend-build-release]
+description = "Compile web-agent-server (release profile)"
+category = "Backend"
+install_crate = false
+command = "cargo"
+args = ["build", "--release", "--bin", "web-agent-server"]
+
+# ---------------------------------------------------------------------------
+# Development mode (Rust API server + Vite HMR dev server in parallel)
+# ---------------------------------------------------------------------------
+
+[tasks.dev-backend]
+description = "Run Rust API backend server in development mode (UI redirects to Vite)"
+category = "Development"
+dependencies = ["backend-build-dev"]
+env = { DEV_FRONTEND_URL = "http://${FRONTEND_HOST}:${FRONTEND_PORT}" }
+command = "./target/debug/web-agent-server"
+args = ["${@}"]
+
+[tasks.dev-frontend]
+description = "Run Vite frontend dev server (proxies /api to API_URL)"
+category = "Development"
+dependencies = ["frontend-ensure"]
+command = "pnpm"
+args = ["--dir", "frontend", "run", "dev"]
+
+[tasks.dev]
+description = "Build backend and run Rust API server + Vite dev server in parallel"
+category = "Development"
+dependencies = ["frontend-ensure", "backend-build-dev"]
+run_task = { name = ["dev-backend", "dev-frontend"], parallel = true }
+
+# ---------------------------------------------------------------------------
+# Release mode (single Rust binary serving static SvelteKit SPA + JSON API)
+# ---------------------------------------------------------------------------
+
+[tasks.build-release]
+description = "Build static SPA frontend and release Rust server binary"
+category = "Release"
+dependencies = ["frontend-build", "backend-build-release"]
+
+[tasks.release]
+description = "Build static SPA + release binary and run the single-server release app"
+category = "Release"
+dependencies = ["build-release"]
+env = { DEV_FRONTEND_URL = { unset = true } }
+command = "./target/release/web-agent-server"
+args = ["${@}"]
+
+[tasks.run]
+description = "Alias for release"
+category = "Release"
+alias = "release"
+
+# ---------------------------------------------------------------------------
+# Verification, tests, formatting, and report generation
+# ---------------------------------------------------------------------------
+
+[tasks.fmt]
+description = "Format Rust workspace code"
+category = "Verification"
+toolchain = "nightly"
+install_crate = false
+command = "cargo"
+args = ["fmt"]
+
+[tasks.clippy]
+description = "Run clippy across the Rust workspace with warnings denied"
+category = "Verification"
+install_crate = false
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.test]
+description = "Run all Rust workspace unit, property-based, and integration tests"
+category = "Verification"
+install_crate = false
+command = "cargo"
+args = ["test", "--workspace"]
+
+[tasks.check]
+description = "Run all static checks (Rust clippy + SvelteKit sv check + Deno screenshot script)"
+category = "Verification"
+dependencies = ["clippy", "frontend-check"]
+command = "deno"
+args = ["check", "report/capture-screenshots.ts"]
+
+[tasks.report-screenshots]
+description = "Capture fresh full-page SPA screenshots via Firefox WebDriver BiDi"
+category = "Report"
+dependencies = ["frontend-build", "backend-build-dev"]
+env = { DEV_FRONTEND_URL = { unset = true } }
+command = "deno"
+args = [
+  "run",
+  "--allow-run",
+  "--allow-read",
+  "--allow-write",
+  "--allow-net",
+  "--allow-env",
+  "report/capture-screenshots.ts",
+]
+
+[tasks.report]
+description = "Compile Typst report (report/main.typ -> report/main.pdf)"
+category = "Report"
+command = "typst"
+args = ["compile", "report/main.typ", "report/main.pdf"]

@@ -413,13 +413,13 @@ mod tests {
                 prop_assert!((0.0..=1.0).contains(&fact.cf));
             }
 
-            let changed = facts["http_changed_sites_count"].value.as_f64().unwrap();
-            let monitored = facts["http_monitored_sites_count"].value.as_f64().unwrap();
-            let disabled = facts["disabled_sources_count"].value.as_f64().unwrap();
-            let total_art = facts["total_matched_articles"].value.as_f64().unwrap();
-            let cyber_art = facts["cyber_articles_count"].value.as_f64().unwrap();
-            let cyber_crit = facts["cyber_critical_articles"].value.as_f64().unwrap();
-            let cve_count = facts["cve_mentions_count"].value.as_f64().unwrap();
+            let changed = facts["http_changed_sites_count"].value.to_f64().unwrap();
+            let monitored = facts["http_monitored_sites_count"].value.to_f64().unwrap();
+            let disabled = facts["disabled_sources_count"].value.to_f64().unwrap();
+            let total_art = facts["total_matched_articles"].value.to_f64().unwrap();
+            let cyber_art = facts["cyber_articles_count"].value.to_f64().unwrap();
+            let cyber_crit = facts["cyber_critical_articles"].value.to_f64().unwrap();
+            let cve_count = facts["cve_mentions_count"].value.to_f64().unwrap();
 
             prop_assert!(changed <= monitored);
             prop_assert_eq!(monitored as usize, sites.len());
@@ -435,7 +435,7 @@ mod tests {
 
             // detected_cves присутній тоді й лише тоді, коли знайдено хоча б 1 унікальний CVE, і відсортований
             if cve_count > 0.0 {
-                let text = facts["detected_cves"].value.as_text();
+                let text = facts["detected_cves"].value.to_text();
                 let list: Vec<&str> = text.split(", ").collect();
                 prop_assert_eq!(list.len(), cve_count as usize);
                 for pair in list.windows(2) {
@@ -447,10 +447,10 @@ mod tests {
 
             // Перевірка відношення EUR/USD та максимального модуля дельти
             let expected_ratio = ((eur / usd) * 10_000.0).round() / 10_000.0;
-            prop_assert!((facts["nbu_eur_usd_ratio"].value.as_f64().unwrap() - expected_ratio).abs() < 1e-9);
+            prop_assert!((facts["nbu_eur_usd_ratio"].value.to_f64().unwrap() - expected_ratio).abs() < 1e-9);
 
             let expected_max_delta = (usd_delta.abs().max(eur_delta.abs()) * 10_000.0).round() / 10_000.0;
-            prop_assert!((facts["nbu_max_abs_delta_pct"].value.as_f64().unwrap() - expected_max_delta).abs() < 1e-9);
+            prop_assert!((facts["nbu_max_abs_delta_pct"].value.to_f64().unwrap() - expected_max_delta).abs() < 1e-9);
         }
     }
 }

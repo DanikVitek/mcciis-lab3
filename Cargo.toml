@@ -11,7 +11,6 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-askama = "0.16.1"
 axum = "0.8.9"
 feed-rs = "3.0.0"
 hashbrown = { version = "0.17.2", features = ["serde"] }
@@ -28,7 +27,7 @@ time = { version = "0.3.55", features = ["serde-well-known", "formatting", "pars
 tokio = { version = "1.54.1", features = ["full"] }
 toml = "1.2.2"
 tower = { version = "0.5.3", features = ["limit", "timeout"] }
-tower-http = { version = "0.7.1", features = ["trace", "compression-gzip"] }
+tower-http = { version = "0.7.1", features = ["trace", "compression-gzip", "fs"] }
 tracing = "0.1.44"
 tracing-appender = { version = "0.2.5", features = ["parking_lot"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

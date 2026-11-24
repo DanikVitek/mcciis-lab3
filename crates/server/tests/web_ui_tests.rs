@@ -29,7 +29,12 @@ use web_agent::config::{
 };
 use web_agent::health::RetryPolicy;
 use web_agent_server::logging::build_rotating_appender;
-use web_agent_server::web::build_router;
+use web_agent_server::web::build_router_with_frontend_dir;
+#[cfg(debug_assertions)]
+use web_agent_server::web::{
+    FrontendMode,
+    build_router_with_frontend_mode,
+};
 
 async fn spawn_mock_sources() -> String {
     let app = Router::new()
@@ -63,19 +68,36 @@ async fn spawn_mock_sources() -> String {
 }
 
 #[tokio::test]
-async fn web_interface_serves_required_routes_and_logs_to_rotating_file() {
+async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
     let mock_base = spawn_mock_sources().await;
 
     let temp_state = PathBuf::from(format!(
-        "/tmp/web_agent_server_ui_test_{}.json",
+        "/tmp/web_agent_server_api_test_{}.json",
         std::process::id()
     ));
     let temp_log_dir = PathBuf::from(format!(
         "/tmp/web_agent_server_e2e_logs_{}",
         std::process::id()
     ));
+    let temp_frontend_dir = PathBuf::from(format!(
+        "/tmp/web_agent_server_e2e_frontend_{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&temp_state);
     let _ = std::fs::remove_dir_all(&temp_log_dir);
+    let _ = std::fs::remove_dir_all(&temp_frontend_dir);
+
+    std::fs::create_dir_all(temp_frontend_dir.join("_app")).unwrap();
+    std::fs::write(
+        temp_frontend_dir.join("index.html"),
+        "<!doctype html><html><body><div id=\"spa-root\">SPA OK</div></body></html>",
+    )
+    .unwrap();
+    std::fs::write(
+        temp_frontend_dir.join("_app/bundle.js"),
+        "console.log('static asset ok');",
+    )
+    .unwrap();
 
     let log_cfg = LoggingConfig::new(
         temp_log_dir.clone(),
@@ -132,10 +154,10 @@ async fn web_interface_serves_required_routes_and_logs_to_rotating_file() {
     let kb = KnowledgeBase::load_from_file(&config.dss.rules_path).unwrap();
     let agent = WebAgent::new(config, InferenceEngine::new(kb)).unwrap();
 
-    // 1. Виконуємо повний цикл опитування мок-джерел під ротованим файловим логером
+    // 1. Повний цикл опитування мок-джерел під ротованим файловим логером
     agent.poll_once().with_subscriber(dispatch.clone()).await;
 
-    let router = build_router(agent);
+    let router = build_router_with_frontend_dir(agent, temp_frontend_dir.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_handle = tokio::spawn(
@@ -148,41 +170,134 @@ async fn web_interface_serves_required_routes_and_logs_to_rotating_file() {
     let client = reqwest::Client::new();
     let base = format!("http://{addr}");
 
-    // 2. /index.html
-    let idx = client
-        .get(format!("{base}/index.html"))
-        .send()
-        .await
-        .unwrap();
-    assert!(idx.status().is_success());
-    let idx_html = idx.text().await.unwrap();
-    assert!(idx_html.contains("HTTP/HTTPS-сайти"));
-    assert!(idx_html.contains("Відібрані повідомлення"));
-    assert!(idx_html.contains("Mock Portal"));
-    assert!(idx_html.contains("CVE-2026-55555"));
+    // 2. Статичний фронтенд SPA (корінь, асети та client-side fallback 200 OK для /dss, /conf, /article/*)
+    for route in ["/", "/dss", "/conf", "/article/demo"] {
+        let resp = client.get(format!("{base}{route}")).send().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "route {route} did not return 200 OK"
+        );
+        let html = resp.text().await.unwrap();
+        assert!(
+            html.contains("SPA OK"),
+            "route {route} did not serve index.html"
+        );
+    }
 
-    // 3. /conf.html
-    let conf = client
-        .get(format!("{base}/conf.html"))
+    let js = client
+        .get(format!("{base}/_app/bundle.js"))
         .send()
         .await
+        .unwrap()
+        .text()
+        .await
         .unwrap();
-    assert!(conf.status().is_success());
-    let conf_html = conf.text().await.unwrap();
-    assert!(conf_html.contains("poll_interval_secs"));
-    assert!(conf_html.contains("web-agent-server.log"));
-    assert!(conf_html.contains("append-only файл з ротацією"));
+    assert!(js.contains("static asset ok"));
 
-    // 4. POST /dss/fact → ручне додавання факту та перевірка на /dss.html і /api/state
-    let resp = client
-        .post(format!("{base}/dss/fact"))
-        .form(&[("key", "nbu_rate_usd"), ("value", "43.25"), ("cf", "1.0")])
+    let unknown_api = client
+        .get(format!("{base}/api/unknown-route"))
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
-    let dss_html = resp.text().await.unwrap();
-    assert!(dss_html.contains("R_FX_USD_HIGH"));
+    assert_eq!(unknown_api.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 3. GET /api/health та /api/ui-state
+    let health = client
+        .get(format!("{base}/api/health"))
+        .send()
+        .await
+        .unwrap();
+    assert!(health.status().is_success());
+
+    let ui_state: serde_json::Value = client
+        .get(format!("{base}/api/ui-state"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ui_state["snapshot"]["sites"][0]["name"], "Mock Portal");
+    assert_eq!(
+        ui_state["snapshot"]["articles"][0]["cves"][0],
+        "CVE-2026-55555"
+    );
+    assert!(ui_state["rules"].is_array());
+    assert!(
+        ui_state["pretty_toml"]
+            .as_str()
+            .unwrap()
+            .contains("poll_interval_secs")
+    );
+    assert!(
+        ui_state["pretty_toml"]
+            .as_str()
+            .unwrap()
+            .contains("web-agent-server.log")
+    );
+
+    // 4. GET /api/articles/{id} та 404 для невідомого ID
+    let art_id = ui_state["snapshot"]["articles"][0]["id"].as_str().unwrap();
+    let art_resp = client
+        .get(format!("{base}/api/articles/{art_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(art_resp.status().is_success());
+    let art_json: serde_json::Value = art_resp.json().await.unwrap();
+    assert_eq!(art_json["id"], art_id);
+
+    let missing_resp = client
+        .get(format!("{base}/api/articles/nonexistent"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 5. POST /api/sites/{id}/ack і /unack
+    let acked: serde_json::Value = client
+        .post(format!("{base}/api/sites/mock-site/ack"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(acked["snapshot"]["sites"][0]["acknowledged"], true);
+
+    let unacked: serde_json::Value = client
+        .post(format!("{base}/api/sites/mock-site/unack"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unacked["snapshot"]["sites"][0]["acknowledged"], false);
+
+    // 6. POST /api/dss/fact → ручне додавання факту та перевірка перерахунку ІСППР і /api/state
+    let updated: serde_json::Value = client
+        .post(format!("{base}/api/dss/fact"))
+        .json(&serde_json::json!({
+            "key": "nbu_rate_usd",
+            "value": "43.25",
+            "cf": 1.0
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        updated["snapshot"]["manual_facts"]["nbu_rate_usd"]["value"],
+        43.25
+    );
+    let fired = updated["snapshot"]["inference"]["fired_rule_ids"]
+        .as_array()
+        .unwrap();
+    assert!(fired.iter().any(|r| r == "R_FX_USD_HIGH"));
 
     let state_json: serde_json::Value = client
         .get(format!("{base}/api/state"))
@@ -194,13 +309,29 @@ async fn web_interface_serves_required_routes_and_logs_to_rotating_file() {
         .unwrap();
     assert_eq!(state_json["manual_facts"]["nbu_rate_usd"]["value"], 43.25);
 
+    // 7. POST /api/dss/fact/clear
+    let cleared: serde_json::Value = client
+        .post(format!("{base}/api/dss/fact/clear"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        cleared["snapshot"]["manual_facts"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+
     // Завершуємо мок-сервер і скидаємо буфер неблокуючого файлового логера
     server_handle.abort();
     let _ = server_handle.await;
     drop(dispatch);
     drop(guard);
 
-    // 5. Перевіряємо ротований append-only лог-файл
+    // 8. Перевіряємо ротований append-only лог-файл
     let entries: Vec<PathBuf> = std::fs::read_dir(&temp_log_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -222,6 +353,91 @@ async fn web_interface_serves_required_routes_and_logs_to_rotating_file() {
 
     let _ = std::fs::remove_file(&temp_state);
     let _ = std::fs::remove_dir_all(&temp_log_dir);
+    let _ = std::fs::remove_dir_all(&temp_frontend_dir);
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn dev_redirect_mode_redirects_ui_routes_and_keeps_api_routes() {
+    let temp_state = PathBuf::from(format!(
+        "/tmp/web_agent_server_dev_redirect_{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&temp_state);
+
+    let config = AppConfig::new(
+        ServerConfig::new("127.0.0.1:0".into(), 300, 5, 4, RetryPolicy::default()).unwrap(),
+        LoggingConfig::new(
+            PathBuf::from("/tmp/web_agent_dev_redirect_logs"),
+            "dev-test.log".to_string(),
+            LogRotation::Daily,
+            3,
+        )
+        .unwrap(),
+        DssConfig {
+            rules_path: PathBuf::from("../../knowledge/rules.toml"),
+            state_path: temp_state.clone(),
+        },
+        NbuMetricsConfig {
+            enabled: false,
+            url: "http://127.0.0.1:9/nbu".into(),
+            currencies: vec![],
+        },
+        vec![],
+        vec![],
+    )
+    .unwrap();
+
+    let kb = KnowledgeBase::load_from_file(&config.dss.rules_path).unwrap();
+    let agent = WebAgent::new(config, InferenceEngine::new(kb)).unwrap();
+
+    let router = build_router_with_frontend_mode(
+        agent,
+        FrontendMode::DevRedirect("http://127.0.0.1:5173".to_string()),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let base = format!("http://{addr}");
+
+    let redirect_resp = client
+        .get(format!("{base}/dss?filter=critical"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        redirect_resp.status(),
+        reqwest::StatusCode::TEMPORARY_REDIRECT
+    );
+    assert_eq!(
+        redirect_resp.headers().get("location").unwrap(),
+        "http://127.0.0.1:5173/dss?filter=critical"
+    );
+
+    let health = client
+        .get(format!("{base}/api/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+    let missing_api = client
+        .get(format!("{base}/api/nonexistent"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_api.status(), reqwest::StatusCode::NOT_FOUND);
+
+    server_handle.abort();
+    let _ = server_handle.await;
+    let _ = std::fs::remove_file(&temp_state);
 }
 
 #[test]

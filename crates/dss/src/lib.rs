@@ -25,7 +25,7 @@ pub enum FactValue {
 }
 
 impl FactValue {
-    pub fn as_f64(&self) -> Option<f64> {
+    pub fn to_f64(&self) -> Option<f64> {
         match self {
             Self::Number(v) => Some(*v),
             Self::Text(s) => s.trim().parse::<f64>().ok(),
@@ -33,7 +33,7 @@ impl FactValue {
         }
     }
 
-    pub fn as_text(&self) -> String {
+    pub fn to_text(&self) -> String {
         match self {
             Self::Bool(b) => b.to_string(),
             Self::Number(n) => {
@@ -69,7 +69,7 @@ impl FactValue {
 
 impl fmt::Display for FactValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.as_text())
+        f.write_str(&self.to_text())
     }
 }
 
@@ -148,31 +148,31 @@ impl Operator {
 
     pub fn matches(self, actual: &FactValue, expected: &FactValue) -> bool {
         match self {
-            Self::Eq => match (actual.as_f64(), expected.as_f64()) {
+            Self::Eq => match (actual.to_f64(), expected.to_f64()) {
                 (Some(a), Some(b)) => (a - b).abs() < 1e-9,
-                _ => actual.as_text().eq_ignore_ascii_case(&expected.as_text()),
+                _ => actual.to_text().eq_ignore_ascii_case(&expected.to_text()),
             },
             Self::Ne => !Self::Eq.matches(actual, expected),
             Self::Gt => matches!(
-                (actual.as_f64(), expected.as_f64()),
+                (actual.to_f64(), expected.to_f64()),
                 (Some(a), Some(b)) if a > b
             ),
             Self::Gte => matches!(
-                (actual.as_f64(), expected.as_f64()),
+                (actual.to_f64(), expected.to_f64()),
                 (Some(a), Some(b)) if a >= b
             ),
             Self::Lt => matches!(
-                (actual.as_f64(), expected.as_f64()),
+                (actual.to_f64(), expected.to_f64()),
                 (Some(a), Some(b)) if a < b
             ),
             Self::Lte => matches!(
-                (actual.as_f64(), expected.as_f64()),
+                (actual.to_f64(), expected.to_f64()),
                 (Some(a), Some(b)) if a <= b
             ),
             Self::Contains => actual
-                .as_text()
+                .to_text()
                 .to_lowercase()
-                .contains(&expected.as_text().to_lowercase()),
+                .contains(&expected.to_text().to_lowercase()),
         }
     }
 }

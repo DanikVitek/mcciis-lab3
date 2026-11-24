@@ -2,15 +2,13 @@
 name = "web-agent-server"
 version.workspace = true
 edition.workspace = true
-description = "Web interface and runtime server for the Intelligent Web-Agent + DSS (Lab 3)"
+description = "JSON API and runtime server for the Intelligent Web-Agent + DSS (Lab 3)"
 
 [dependencies]
-askama.workspace = true
 axum.workspace = true
 dss.workspace = true
-hashbrown.workspace = true
 serde.workspace = true
-time.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tower.workspace = true
@@ -21,5 +19,4 @@ tracing-subscriber.workspace = true
 web-agent.workspace = true
 
 [dev-dependencies]
-reqwest = { workspace = true, features = ["form"] }
-serde_json.workspace = true
+reqwest = { workspace = true, features = ["json"] }
