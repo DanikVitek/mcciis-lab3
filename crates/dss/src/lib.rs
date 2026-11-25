@@ -27,9 +27,9 @@ const FLOAT_EQ_EPSILON: f64 = 1e-9;
 /// Нормалізує коефіцієнт впевненості у діапазон `[0.0, 1.0]`, захищаючи від `NaN` і нескінченностей.
 #[inline]
 #[must_use]
-fn normalize_cf(cf: f64) -> f64 {
-    if cf.is_finite() {
-        cf.clamp(0.0, 1.0)
+fn normalize_cf(certainty_factor: f64) -> f64 {
+    if certainty_factor.is_finite() {
+        certainty_factor.clamp(0.0, 1.0)
     } else {
         0.0
     }
@@ -73,7 +73,7 @@ impl FactValue {
         match self {
             Self::Bool(true) => Cow::Borrowed("true"),
             Self::Bool(false) => Cow::Borrowed("false"),
-            Self::Number(n) => Cow::Owned(format_number(*n)),
+            Self::Number(n) => Cow::Owned(fmt::from_fn(|f| format_number(f, *n)).to_string()),
             Self::Text(s) => Cow::Borrowed(s.as_str()),
         }
     }
@@ -84,7 +84,7 @@ impl FactValue {
         match self {
             Self::Bool(true) => "true".to_owned(),
             Self::Bool(false) => "false".to_owned(),
-            Self::Number(n) => format_number(n),
+            Self::Number(n) => fmt::from_fn(|f| format_number(f, n)).to_string(),
             Self::Text(s) => s,
         }
     }
@@ -135,21 +135,13 @@ impl FactValue {
     }
 }
 
-fn format_number(n: f64) -> String {
+fn format_number(f: &mut fmt::Formatter<'_>, n: f64) -> fmt::Result {
     if !n.is_finite() {
-        return n.to_string();
-    }
-    if n.fract().abs() < f64::EPSILON {
-        format!("{n:.0}")
+        fmt::Display::fmt(&n, f)
+    } else if n.fract().abs() < f64::EPSILON {
+        fmt::Display::fmt(&n.trunc(), f)
     } else {
-        let mut s = format!("{n:.4}");
-        while s.ends_with('0') {
-            s.pop();
-        }
-        if s.ends_with('.') {
-            s.pop();
-        }
-        s
+        fmt::Display::fmt(&(n.trunc() + (n.fract() * 10000.0).trunc() / 10000.0), f)
     }
 }
 
@@ -162,13 +154,9 @@ impl From<&str> for FactValue {
 impl fmt::Display for FactValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bool(true) => f.write_str("true"),
-            Self::Bool(false) => f.write_str("false"),
-            Self::Text(s) => f.write_str(s),
-            Self::Number(n) if n.is_finite() && n.fract().abs() < f64::EPSILON => {
-                write!(f, "{n:.0}")
-            }
-            Self::Number(n) => f.write_str(&format_number(*n)),
+            Self::Bool(b) => fmt::Display::fmt(b, f),
+            Self::Text(s) => fmt::Display::fmt(s, f),
+            Self::Number(n) => format_number(f, *n),
         }
     }
 }
@@ -203,7 +191,8 @@ pub struct Fact {
     pub key: String,
     pub value: FactValue,
     pub source: String,
-    pub cf: f64,
+    #[serde(rename = "cf")]
+    pub certainty_factor: f64,
     pub origin: FactOrigin,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
@@ -216,14 +205,14 @@ impl Fact {
         key: impl Into<String>,
         value: FactValue,
         source: impl Into<String>,
-        cf: f64,
+        certainty_factor: f64,
         origin: FactOrigin,
     ) -> Self {
         Self {
             key: key.into(),
             value,
             source: source.into(),
-            cf: normalize_cf(cf),
+            certainty_factor: normalize_cf(certainty_factor),
             origin,
             updated_at: OffsetDateTime::now_utc(),
         }
@@ -248,13 +237,13 @@ impl Operator {
     #[must_use]
     pub const fn symbol(self) -> &'static str {
         match self {
-            Self::Eq => "==",
-            Self::Ne => "!=",
+            Self::Eq => "=",
+            Self::Ne => "≠",
             Self::Gt => ">",
-            Self::Gte => ">=",
+            Self::Gte => "≥",
             Self::Lt => "<",
-            Self::Lte => "<=",
-            Self::Contains => "містить",
+            Self::Lte => "≤",
+            Self::Contains => "∋",
         }
     }
 
@@ -348,7 +337,7 @@ pub struct Rule {
     pub description: String,
     pub priority: i32,
     pub severity: Severity,
-    pub cf: f64,
+    pub certainty_factor: f64,
     pub conditions: Vec<Condition>,
     pub derived_fact: Option<DerivedFactSpec>,
     pub recommendation: String,
@@ -364,7 +353,7 @@ struct RawRule {
     #[serde(default)]
     priority: i32,
     severity: Severity,
-    cf: f64,
+    certainty_factor: f64,
     conditions: Vec<Condition>,
     derived_fact: Option<DerivedFactSpec>,
     recommendation: String,
@@ -380,7 +369,7 @@ impl TryFrom<RawRule> for Rule {
             .description(raw.description)
             .priority(raw.priority)
             .severity(raw.severity)
-            .cf(raw.cf)
+            .certainty_factor(raw.certainty_factor)
             .conditions(raw.conditions)
             .maybe_derived_fact(raw.derived_fact)
             .recommendation(raw.recommendation)
@@ -404,7 +393,7 @@ impl Rule {
         #[builder(default)] description: String,
         #[builder(default)] priority: i32,
         severity: Severity,
-        cf: f64,
+        certainty_factor: f64,
         conditions: Vec<Condition>,
         derived_fact: Option<DerivedFactSpec>,
         recommendation: String,
@@ -419,7 +408,7 @@ impl Rule {
                 "правило `{id}` повинно містити хоча б одну умову"
             )));
         }
-        if !cf.is_finite() || !(0.0..=1.0).contains(&cf) {
+        if !certainty_factor.is_finite() || !(0.0..=1.0).contains(&certainty_factor) {
             return Err(DssError::InvalidRule(format!(
                 "коефіцієнт впевненості CF правила `{id}` має бути в межах [0.0; 1.0]"
             )));
@@ -430,7 +419,7 @@ impl Rule {
             description,
             priority,
             severity,
-            cf,
+            certainty_factor,
             conditions,
             derived_fact,
             recommendation,
@@ -597,7 +586,7 @@ impl InferenceEngine {
                 }
 
                 if let Some((min_cond_cf, traces)) = check_conditions(rule, &working_memory) {
-                    let decision_cf = normalize_cf(min_cond_cf * rule.cf);
+                    let decision_cf = normalize_cf(min_cond_cf * rule.certainty_factor);
                     fired_rules.insert(rule.id.as_str());
                     changed = true;
 
@@ -607,7 +596,8 @@ impl InferenceEngine {
                                 if existing.origin == FactOrigin::Inferred
                                     && existing.value.approx_eq(&derived.value) =>
                             {
-                                existing.cf = Self::combine_cf(existing.cf, decision_cf);
+                                existing.certainty_factor =
+                                    Self::combine_cf(existing.certainty_factor, decision_cf);
                                 existing.source.push_str(", ");
                                 existing.source.push_str(&rule.id);
                                 existing.updated_at = OffsetDateTime::now_utc();
@@ -615,7 +605,7 @@ impl InferenceEngine {
                             }
                             Some(existing)
                                 if existing.origin == FactOrigin::Inferred
-                                    && decision_cf > existing.cf =>
+                                    && decision_cf > existing.certainty_factor =>
                             {
                                 let updated = Fact::new(
                                     derived.key.clone(),
@@ -691,14 +681,14 @@ fn check_conditions(
         if !cond.op.matches(&fact.value, &cond.value) {
             return None;
         }
-        min_cf = min_cf.min(normalize_cf(fact.cf));
+        min_cf = min_cf.min(normalize_cf(fact.certainty_factor));
         traces.push(ConditionTrace {
             fact_key: cond.fact.clone(),
             operator: cond.op,
             expected: cond.value.clone(),
             actual: fact.value.clone(),
             fact_source: fact.source.clone(),
-            fact_cf: fact.cf,
+            fact_cf: fact.certainty_factor,
         });
     }
 
@@ -733,8 +723,8 @@ mod tests {
     fn non_finite_cf_is_normalized_to_zero() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let fact = Fact::new("k", FactValue::Bool(true), "src", bad, FactOrigin::Manual);
-            assert!(fact.cf.is_finite());
-            assert!((0.0..=1.0).contains(&fact.cf));
+            assert!(fact.certainty_factor.is_finite());
+            assert!((0.0..=1.0).contains(&fact.certainty_factor));
 
             let combined = InferenceEngine::combine_cf(bad, 0.5);
             assert!(combined.is_finite());
@@ -841,7 +831,7 @@ mod tests {
         #[test]
         fn fact_new_always_clamps_cf(cf in -10.0_f64..10.0_f64) {
             let fact = Fact::new("k", FactValue::Bool(true), "src", cf, FactOrigin::Manual);
-            prop_assert!((0.0..=1.0).contains(&fact.cf));
+            prop_assert!((0.0..=1.0).contains(&fact.certainty_factor));
         }
 
         #[test]
@@ -850,7 +840,7 @@ mod tests {
                 .id("R1")
                 .name("Rule")
                 .severity(Severity::Info)
-                .cf(cf)
+                .certainty_factor(cf)
                 .conditions(vec![Condition {
                     fact: "x".into(),
                     op: Operator::Eq,
@@ -876,7 +866,7 @@ mod tests {
                     .name(format!("Step {i}"))
                     .priority(priorities[i])
                     .severity(severities[i])
-                    .cf(rule_cfs[i])
+                    .certainty_factor(rule_cfs[i])
                     .conditions(vec![Condition {
                         fact: format!("step_{i}"),
                         op: Operator::Eq,
@@ -916,7 +906,7 @@ mod tests {
             for i in 0..chain_len {
                 running_cf = (running_cf * rule_cfs[i]).clamp(0.0, 1.0);
                 let derived = &res.inferred_facts[&format!("step_{}", i + 1)];
-                prop_assert!((derived.cf - running_cf).abs() < 1e-12);
+                prop_assert!((derived.certainty_factor - running_cf).abs() < 1e-12);
                 prop_assert_eq!(derived.origin, FactOrigin::Inferred);
             }
 
@@ -945,7 +935,7 @@ mod tests {
                     .name(id)
                     .priority(10)
                     .severity(Severity::High)
-                    .cf(cf)
+                    .certainty_factor(cf)
                     .conditions(vec![Condition {
                         fact: "signal".into(),
                         op: Operator::Eq,
@@ -971,7 +961,7 @@ mod tests {
 
             let res = engine.evaluate(&facts);
             let expected_cf = InferenceEngine::combine_cf(fact_cf * cf1, fact_cf * cf2);
-            let actual_cf = res.inferred_facts["risk"].cf;
+            let actual_cf = res.inferred_facts["risk"].certainty_factor;
             prop_assert!((actual_cf - expected_cf).abs() < 1e-12);
         }
     }

@@ -123,7 +123,7 @@ fn forward_chaining_and_mycin_cf_combination() {
         .get("fx_pressure_level")
         .expect("fx_pressure_level must be inferred");
     assert_eq!(fx_fact.value, FactValue::Text("elevated".into()));
-    assert!((fx_fact.cf - 0.96).abs() < 1e-6);
+    assert!((fx_fact.certainty_factor - 0.96).abs() < 1e-6);
 
     // Ланцюговий вивід (Level 2): R_META_CRISIS_MODE активується на основі виведених фактів
     let op_mode = result

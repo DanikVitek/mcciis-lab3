@@ -124,7 +124,7 @@ pub fn extract_facts(
             cyber_articles += 1;
             let has_critical_term = article.matched_keywords.iter().any(|mk| {
                 let w = mk.word.to_lowercase();
-                CRITICAL_CYBER_TERMS.iter().any(|t| w.contains(t))
+                CRITICAL_CYBER_TERMS.iter().copied().any(|t| w.contains(t))
             });
             if has_critical_term || !article.cves.is_empty() {
                 cyber_critical_articles += 1;
@@ -258,12 +258,12 @@ fn insert_fact(
     key: impl Into<String>,
     value: FactValue,
     source: impl Into<String>,
-    cf: f64,
+    certainty_factor: f64,
 ) {
     let key = key.into();
     facts.insert(
         key.clone(),
-        Fact::new(key, value, source, cf, FactOrigin::WebAgent),
+        Fact::new(key, value, source, certainty_factor, FactOrigin::WebAgent),
     );
 }
 
@@ -413,7 +413,7 @@ mod tests {
             // Усі витягнуті факти належать WebAgent і мають CF у [0, 1]
             for fact in facts.values() {
                 prop_assert_eq!(fact.origin, FactOrigin::WebAgent);
-                prop_assert!((0.0..=1.0).contains(&fact.cf));
+                prop_assert!((0.0..=1.0).contains(&fact.certainty_factor));
             }
 
             let changed = facts["http_changed_sites_count"].value.to_f64().unwrap();

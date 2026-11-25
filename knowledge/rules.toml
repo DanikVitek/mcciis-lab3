@@ -8,7 +8,7 @@ name = "Критичний рівень кіберзагроз (виявлено
 description = "Активація при наявності згадок CVE та критичних статей у стрічках кібербезпеки."
 priority = 100
 severity = "critical"
-cf = 0.90
+certainty_factor = 0.90
 conditions = [
   { fact = "cve_mentions_count", op = "gte", value = 1.0 },
   { fact = "cyber_critical_articles", op = "gte", value = 1.0 },
@@ -22,7 +22,7 @@ name = "Високий потік подій кібербезпеки"
 description = "Виявлено 3 або більше релевантних повідомлень у групі кібербезпеки."
 priority = 90
 severity = "high"
-cf = 0.82
+certainty_factor = 0.82
 conditions = [
   { fact = "cyber_articles_count", op = "gte", value = 3.0 },
 ]
@@ -35,7 +35,7 @@ name = "Помірна активність у сфері кібербезпек
 description = "Виявлено окремі релевантні повідомлення з кібербезпеки."
 priority = 70
 severity = "medium"
-cf = 0.68
+certainty_factor = 0.68
 conditions = [
   { fact = "cyber_articles_count", op = "gte", value = 1.0 },
   { fact = "cyber_articles_count", op = "lt", value = 3.0 },
@@ -49,7 +49,7 @@ name = "Штатний стан кібербезпеки"
 description = "У поточному зрізі релевантних інцидентів кібербезпеки не зафіксовано."
 priority = 60
 severity = "info"
-cf = 0.85
+certainty_factor = 0.85
 conditions = [
   { fact = "cyber_articles_count", op = "eq", value = 0.0 },
 ]
@@ -62,7 +62,7 @@ name = "Підвищений офіційний курс USD (НБУ)"
 description = "Офіційний курс долара США перевищив встановлений поріг 41.00 грн."
 priority = 80
 severity = "medium"
-cf = 0.80
+certainty_factor = 0.80
 conditions = [
   { fact = "nbu_rate_usd", op = "gte", value = 41.0 },
 ]
@@ -75,7 +75,7 @@ name = "Підвищений офіційний курс EUR (НБУ)"
 description = "Офіційний курс євро перевищив встановлений поріг 44.00 грн."
 priority = 80
 severity = "medium"
-cf = 0.80
+certainty_factor = 0.80
 conditions = [
   { fact = "nbu_rate_eur", op = "gte", value = 44.0 },
 ]
@@ -88,7 +88,7 @@ name = "Підвищена волатильність валютних курс�
 description = "Максимальна зміна курсу валют між опитуваннями досягла або перевищила 0.5%."
 priority = 85
 severity = "high"
-cf = 0.86
+certainty_factor = 0.86
 conditions = [
   { fact = "nbu_max_abs_delta_pct", op = "gte", value = 0.5 },
 ]
@@ -101,7 +101,7 @@ name = "Висока активність макроекономічних но�
 description = "У новинних стрічках виявлено 2 або більше релевантних економічних/енергетичних повідомлень."
 priority = 75
 severity = "medium"
-cf = 0.74
+certainty_factor = 0.74
 conditions = [
   { fact = "econ_articles_count", op = "gte", value = 2.0 },
 ]
@@ -114,7 +114,7 @@ name = "Виявлено непереглянуті зміни на контро
 description = "Один або більше сайтів зі списку моніторингу змінили розмір або вміст."
 priority = 75
 severity = "info"
-cf = 0.95
+certainty_factor = 0.95
 conditions = [
   { fact = "http_changed_sites_count", op = "gte", value = 1.0 },
 ]
@@ -127,7 +127,7 @@ name = "Знайдено високорелевантне повідомленн
 description = "Максимальна оцінка релевантності новини перевищує поріг 6.0 балів."
 priority = 82
 severity = "high"
-cf = 0.83
+certainty_factor = 0.83
 conditions = [
   { fact = "top_article_score", op = "gte", value = 6.0 },
 ]
@@ -142,7 +142,7 @@ name = "Комплексний кризовий режим (кіберзагро
 description = "Одночасна наявність критичного рівня кіберзагроз та підвищеного валютного тиску."
 priority = 120
 severity = "critical"
-cf = 0.92
+certainty_factor = 0.92
 conditions = [
   { fact = "cyber_threat_level", op = "eq", value = "critical" },
   { fact = "fx_pressure_level", op = "eq", value = "elevated" },
@@ -156,7 +156,7 @@ name = "Режим посиленого моніторингу ІТ-середо
 description = "Високий рівень кіберподій збігся зі змінами на контрольованих HTTP/HTTPS-ресурсах."
 priority = 110
 severity = "high"
-cf = 0.85
+certainty_factor = 0.85
 conditions = [
   { fact = "cyber_threat_level", op = "eq", value = "high" },
   { fact = "web_environment_state", op = "eq", value = "changed" },
@@ -170,7 +170,7 @@ name = "Посилений фінансово-економічний моніт�
 description = "Підвищені курси валют супроводжуються високою активністю економічних новин."
 priority = 105
 severity = "high"
-cf = 0.81
+certainty_factor = 0.81
 conditions = [
   { fact = "fx_pressure_level", op = "eq", value = "elevated" },
   { fact = "macro_news_activity", op = "eq", value = "high" },
@@ -184,7 +184,7 @@ name = "Штатний операційний режим"
 description = "Відсутні кіберінциденти та непереглянуті зміни веб-сайтів."
 priority = 50
 severity = "info"
-cf = 0.85
+certainty_factor = 0.85
 conditions = [
   { fact = "cyber_threat_level", op = "eq", value = "normal" },
   { fact = "http_changed_sites_count", op = "eq", value = 0.0 },

@@ -813,7 +813,12 @@ impl WebAgent {
     }
 
     /// Додає або оновлює ручний факт користувача та перераховує вивід ІСППР.
-    pub async fn upsert_manual_fact(&self, key: impl Into<String>, value: FactValue, cf: f64) {
+    pub async fn upsert_manual_fact(
+        &self,
+        key: impl Into<String>,
+        value: FactValue,
+        certainty_factor: f64,
+    ) {
         let key = key.into();
         let snapshot_to_save = {
             let mut guard = self.state.write();
@@ -822,10 +827,10 @@ impl WebAgent {
                 key.clone(),
                 value.clone(),
                 "Ручне введення користувача",
-                cf,
+                certainty_factor,
                 FactOrigin::Manual,
             );
-            let effective_cf = fact.cf;
+            let effective_cf = fact.certainty_factor;
             snap.manual_facts.insert(key.clone(), fact);
 
             let base_facts = snap.base_facts();
