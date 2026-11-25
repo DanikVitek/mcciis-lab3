@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
+use core::time::Duration;
 use std::path::Path;
-use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
@@ -70,7 +70,7 @@ struct MinimalWsClient {
 }
 
 impl MinimalWsClient {
-    async fn connect(addr: std::net::SocketAddr, path: &str) -> Self {
+    async fn connect(addr: core::net::SocketAddr, path: &str) -> Self {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let req = format!(
             "GET {path} HTTP/1.1\r\n\

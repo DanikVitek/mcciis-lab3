@@ -4,9 +4,9 @@
 
 pub mod error;
 
+use core::fmt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::fmt;
 use std::path::Path;
 
 use bon::bon;
@@ -707,6 +707,7 @@ fn check_conditions(
 
 #[cfg(test)]
 mod tests {
+
     use proptest::prelude::*;
 
     use super::*;
@@ -928,7 +929,7 @@ mod tests {
                     .then_with(|| b.priority.cmp(&a.priority))
                     .then_with(|| b.cf.total_cmp(&a.cf))
                     .then_with(|| a.rule_id.cmp(&b.rule_id));
-                prop_assert!(ord != std::cmp::Ordering::Greater);
+                prop_assert!(ord != core::cmp::Ordering::Greater);
             }
         }
 

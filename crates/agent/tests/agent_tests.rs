@@ -1,13 +1,13 @@
 #![allow(clippy::unwrap_used)]
 
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{
+use core::sync::atomic::{
     AtomicBool,
     AtomicUsize,
     Ordering,
 };
-use std::time::Duration;
+use core::time::Duration;
+use std::path::Path;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::State;

@@ -1,6 +1,6 @@
 //! Завантаження, парсинг, сканування CVE та ранжування новинних RSS/Atom стрічок.
 
-use std::cmp::Ordering;
+use core::cmp::Ordering;
 
 use feed_rs::parser;
 use hashbrown::HashSet;

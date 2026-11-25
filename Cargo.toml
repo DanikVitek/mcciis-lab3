@@ -61,6 +61,8 @@ map_unwrap_or = "warn"
 needless_pass_by_value = "warn"
 redundant_closure_for_method_calls = "warn"
 semicolon_if_nothing_returned = "warn"
+std_instead_of_core = "warn"
+alloc_instead_of_core = "warn"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

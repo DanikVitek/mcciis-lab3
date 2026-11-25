@@ -1,8 +1,8 @@
 //! HTTP JSON API, WebSocket push-потік і роздача статичного `SvelteKit` SPA.
 
+use core::time::Duration;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::error_handling::HandleErrorLayer;

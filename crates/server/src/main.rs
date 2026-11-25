@@ -1,5 +1,5 @@
+use core::time::Duration;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use color_eyre::eyre::{
     Result,
@@ -145,13 +145,13 @@ async fn shutdown_signal(shutdown: CancellationToken) {
             }
             Err(err) => {
                 warn!(error = %err, "Не вдалося підписатися на сигнал SIGTERM");
-                std::future::pending::<()>().await;
+                core::future::pending::<()>().await;
             }
         }
     };
 
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    let terminate = core::future::pending::<()>();
 
     tokio::select! {
         () = ctrl_c => {

@@ -10,6 +10,7 @@ pub mod health;
 pub mod http_monitor;
 pub mod nbu;
 
+use core::time::Duration;
 use std::collections::{
     BTreeMap,
     VecDeque,
@@ -17,10 +18,7 @@ use std::collections::{
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{
-    Duration,
-    Instant,
-};
+use std::time::Instant;
 
 use dss::{
     Fact,
