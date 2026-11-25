@@ -3,6 +3,7 @@ name = "web-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Autonomous Intelligent Web-Agent (HTTP monitoring, RSS/Atom ranking, NBU metrics, DSS KB fact population)"
 
 [dependencies]

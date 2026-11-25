@@ -3,6 +3,7 @@ name = "dss"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Production Rule-Based Decision Support System core (Forward Chaining + MYCIN CF)"
 
 [dependencies]

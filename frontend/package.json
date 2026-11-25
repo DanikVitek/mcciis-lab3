@@ -2,6 +2,10 @@
   "name": "web-agent-ui",
   "private": true,
   "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/DanikVitek/mcciis-lab3",
+    "directory": "frontend"
+  },
   "type": "module",
   "imports": {
     "#lib": "./src/lib/index.js",
