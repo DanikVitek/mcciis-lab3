@@ -213,7 +213,7 @@
         <span class="mono"><strong>{rule.id}</strong></span>
         <span class={['badge', `sev-${rule.severity}`]}>{severityLabelUk(rule.severity)}</span>
         <span class="badge badge-group num">P={rule.priority}</span>
-        <span class="badge badge-group mono num">CF={rule.cf.toFixed(2)}</span>
+        <span class="badge badge-group mono num">CF={rule.certainty_factor.toFixed(2)}</span>
       </div>
       <span class={['badge', isFired ? 'badge-ok' : 'badge-group']}>
         {isFired ? '✓ Спрацювало' : 'Неактивне'}

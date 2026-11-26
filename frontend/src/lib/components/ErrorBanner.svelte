@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isHttpError } from '@sveltejs/kit';
   import { formatApiError } from '#lib/api.ts';
 
   interface Props {
@@ -10,6 +11,7 @@
   let { error, title = 'Не вдалося завантажити дані', onRetry }: Props = $props();
 
   let message = $derived(formatApiError(error));
+  let isSchemaMismatch = $derived(isHttpError(error) && error.status === 502);
 </script>
 
 <section class="panel error-card" role="alert">
@@ -18,10 +20,17 @@
     <h2 class="err-title">{title}</h2>
   </div>
   <p class="err-msg">{message}</p>
-  <p class="muted err-hint">
-    Переконайтеся, що сервер <code>web-agent-server</code> запущений і доступний, після чого
-    повторіть спробу.
-  </p>
+  {#if isSchemaMismatch}
+    <p class="muted err-hint">
+      Схема відповіді API не відповідає клієнтському інтерфейсу. Перевірте консоль браузера
+      (DevTools) та переконайтеся, що фронтенд перезібрано (<code>cargo make frontend-build</code>).
+    </p>
+  {:else}
+    <p class="muted err-hint">
+      Переконайтеся, що сервер <code>web-agent-server</code> запущений і доступний, після чого
+      повторіть спробу.
+    </p>
+  {/if}
   {#if onRetry}
     <div class="err-actions">
       <button type="button" class="btn" onclick={onRetry}>↻ Спробувати ще раз</button>

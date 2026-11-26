@@ -225,7 +225,15 @@ async fn api_serves_ui_state_spa_static_files_and_logs_to_rotating_file() {
         ui_state["snapshot"]["articles"][0]["cves"][0],
         "CVE-2026-55555"
     );
-    assert!(ui_state["rules"].is_array());
+    let rules = ui_state["rules"].as_array().unwrap();
+    assert!(!rules.is_empty());
+    assert!(rules[0]["certainty_factor"].is_number());
+    assert!(ui_state["snapshot"]["agent_facts"]["http_monitored_sites_count"]["cf"].is_number());
+    let decisions = ui_state["snapshot"]["inference"]["decisions"]
+        .as_array()
+        .unwrap();
+    assert!(!decisions.is_empty());
+    assert!(decisions[0]["cf"].is_number());
     assert!(
         ui_state["pretty_toml"]
             .as_str()

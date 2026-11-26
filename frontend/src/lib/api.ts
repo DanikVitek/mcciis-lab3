@@ -17,6 +17,16 @@ export function formatApiError(err: unknown, fallback = 'Не вдалося в�
   return fallback;
 }
 
+function summarizeSchemaIssues(
+  issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }>,
+): string {
+  const first = issues[0];
+  if (!first) return 'невідома помилка схеми';
+  const path = first.path.length > 0 ? first.path.map(String).join('.') : '<root>';
+  const suffix = issues.length > 1 ? ` (та ще ${issues.length - 1})` : '';
+  return `${path}: ${first.message}${suffix}`;
+}
+
 async function extractErrorMessage(response: Response, fallback: string): Promise<string> {
   const text = await response.text().catch(() => '');
   if (!text) return fallback;
@@ -45,7 +55,8 @@ async function fetchValidatedUiState(
   let response: Response;
   try {
     response = await fetcher(path, init);
-  } catch {
+  } catch (err) {
+    console.error(`[API] Network error while fetching ${path}:`, err);
     error(
       503,
       'Не вдалося підключитися до API-сервера Web-агента. Переконайтеся, що web-agent-server запущено.',
@@ -57,13 +68,23 @@ async function fetchValidatedUiState(
       response,
       `API-сервер повернув помилку ${response.status}.`,
     );
+    console.error(`[API] HTTP ${response.status} from ${path}: ${detail}`);
     error(response.status, detail);
   }
 
-  const raw: unknown = await response.json();
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch (err) {
+    console.error(`[API] Failed to decode JSON response from ${path}:`, err);
+    error(502, 'API-сервер повернув некоректний JSON.');
+  }
+
   const parsed = UiStatePayloadSchema.safeParse(raw);
   if (!parsed.success) {
-    error(502, `Некоректний формат відповіді від API-сервера: ${parsed.error.message}`);
+    const summary = summarizeSchemaIssues(parsed.error.issues);
+    console.error(`[API] Schema validation failed for ${path}:`, parsed.error.issues);
+    error(502, `Некоректний формат відповіді від API-сервера: ${summary}`);
   }
   return parsed.data;
 }
@@ -80,7 +101,8 @@ export async function fetchArticleById(
   let response: Response;
   try {
     response = await fetcher(url);
-  } catch {
+  } catch (err) {
+    console.error(`[API] Network error while fetching ${url}:`, err);
     error(503, 'Не вдалося підключитися до API-сервера Web-агента.');
   }
 
@@ -93,13 +115,23 @@ export async function fetchArticleById(
       response,
       `Помилка завантаження новини (${response.status}).`,
     );
+    console.error(`[API] HTTP ${response.status} from ${url}: ${detail}`);
     error(response.status, detail);
   }
 
-  const raw: unknown = await response.json();
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch (err) {
+    console.error(`[API] Failed to decode JSON response from ${url}:`, err);
+    error(502, 'API-сервер повернув некоректний JSON для новини.');
+  }
+
   const parsed = NewsArticleSchema.safeParse(raw);
   if (!parsed.success) {
-    error(502, `Некоректний формат новини від API-сервера: ${parsed.error.message}`);
+    const summary = summarizeSchemaIssues(parsed.error.issues);
+    console.error(`[API] Schema validation failed for ${url}:`, parsed.error.issues);
+    error(502, `Некоректний формат новини від API-сервера: ${summary}`);
   }
   return parsed.data;
 }

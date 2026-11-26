@@ -15,7 +15,7 @@ export type Severity = z.infer<typeof SeveritySchema>;
 export const ErrorKindSchema = z.enum(['parse', 'transient']);
 export type ErrorKind = z.infer<typeof ErrorKindSchema>;
 
-export const LogRotationSchema = z.enum(['hourly', 'daily', 'never']);
+export const LogRotationSchema = z.enum(['minutely', 'hourly', 'daily', 'never']);
 export type LogRotation = z.infer<typeof LogRotationSchema>;
 
 export const OperationalModeSchema = z.enum([
@@ -137,7 +137,7 @@ export const RuleSchema = z.object({
   description: z.string(),
   priority: z.number(),
   severity: SeveritySchema,
-  cf: z.number(),
+  certainty_factor: z.number(),
   conditions: z.array(ConditionSchema),
   derived_fact: z.nullable(DerivedFactSpecSchema),
   recommendation: z.string(),

@@ -63,7 +63,8 @@ export class UiStateStore {
 
         try {
           socket = new WebSocket(wsUrl);
-        } catch {
+        } catch (err) {
+          console.warn(`[WS] Failed to construct WebSocket for ${wsUrl}:`, err);
           scheduleReconnect();
           return;
         }
@@ -79,11 +80,15 @@ export class UiStateStore {
           let raw: unknown;
           try {
             raw = JSON.parse(msgEvent.data);
-          } catch {
+          } catch (err) {
+            console.warn('[WS] Failed to decode WebSocket JSON message:', err);
             return;
           }
           const parsed = AgentUpdateEventSchema.safeParse(raw);
-          if (!parsed.success) return;
+          if (!parsed.success) {
+            console.warn('[WS] Ignored WebSocket message with unexpected schema:', parsed.error.issues);
+            return;
+          }
 
           const ev = parsed.data;
           setLivePoll(ev.poll_in_progress);
@@ -124,7 +129,8 @@ export class UiStateStore {
           scheduleReconnect();
         };
 
-        socket.onerror = () => {
+        socket.onerror = (ev) => {
+          console.warn(`[WS] WebSocket error on ${wsUrl}; reconnecting`, ev);
           socket?.close();
         };
       };
@@ -173,7 +179,7 @@ export class UiStateStore {
         this.#lastAppliedAt = Date.now();
       },
       () => {
-        // Error is handled by <svelte:boundary> failed snippet
+        // Error is logged in api.ts and handled by <svelte:boundary> failed snippet
       },
     );
     return promise;

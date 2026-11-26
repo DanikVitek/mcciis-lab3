@@ -14,6 +14,8 @@
 
   function rotationLabelUk(rot: LogRotation): string {
     switch (rot) {
+      case 'minutely':
+        return 'Щохвилини';
       case 'hourly':
         return 'Щогодини';
       case 'daily':
